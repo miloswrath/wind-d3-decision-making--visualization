@@ -59,6 +59,8 @@ export class DecisionLayoutChart {
 
     this.svg = select(container)
       .append("svg")
+      .attr("width", this.cfg.width)
+      .attr("height", this.cfg.height + (this.cfg.showWADD ? 36 : 0))
       .style("font-family", this.cfg.fontFamily);
 
     this.gCols = this.svg.append("g").attr("class", "dl-cols");
@@ -97,16 +99,18 @@ export class DecisionLayoutChart {
   }
 
   render() {
-    const { width: initialWidth, height: initialHeight, margin, colors, padding, onUpdate, showWADD } = this.cfg;
+    const { width, height, margin, colors, padding, onUpdate, showWADD } = this.cfg;
+    const innerW = width - margin.left - margin.right;
+    const innerH = height - margin.top - margin.bottom;
     const ROW_GAP = Math.max(2, padding.row);
-    const MAX_ITEMS = 5;
+    const MAX_CHOICES = 5;
 
     const MIN_ROW_PX = 28;
     const rowWeights = this.factors.map(f => Math.max(0, f.weight));
     const totalRowW = Math.max(1e-6, sum(rowWeights));
     const baseRowH = MIN_ROW_PX * this.factors.length;
-    const freeRowH = Math.max(0, initialHeight - margin.top - margin.bottom - baseRowH);
-    const rowCompress = baseRowH > (initialHeight - margin.top - margin.bottom) ? (initialHeight - margin.top - margin.bottom) / baseRowH : 1;
+    const freeRowH = Math.max(0, innerH - baseRowH);
+    const rowCompress = baseRowH > innerH ? innerH / baseRowH : 1;
     const rowHeights: number[] = this.factors.map((_, i) =>
       (MIN_ROW_PX + (freeRowH * (rowWeights[i] / totalRowW))) * rowCompress
     );
@@ -119,8 +123,8 @@ export class DecisionLayoutChart {
     const colWeights = this.options.map(o => Math.max(0, o.weight));
     const totalColW = Math.max(1e-6, sum(colWeights));
     const baseColW = MIN_COL_PX * this.options.length;
-    const freeColW = Math.max(0, initialWidth - margin.left - margin.right - baseColW);
-    const colCompress = baseColW > (initialWidth - margin.left - margin.right) ? (initialWidth - margin.left - margin.right) / baseColW : 1;
+    const freeColW = Math.max(0, innerW - baseColW);
+    const colCompress = baseColW > innerW ? innerW / baseColW : 1;
     const colWidths: number[] = this.options.map((_, i) =>
       (MIN_COL_PX + (freeColW * (colWeights[i] / totalColW))) * colCompress
     );
@@ -128,13 +132,6 @@ export class DecisionLayoutChart {
     for (let i = 1; i < colWidths.length; i++) {
       colLefts[i] = colLefts[i - 1] + colWidths[i - 1];
     }
-
-    // Calculate dynamic SVG dimensions
-    const lastColX = colLefts[colLefts.length - 1] + colWidths[colWidths.length - 1] + 36; // Add button width
-    const lastRowY = rowTops[rowTops.length - 1] + rowHeights[rowHeights.length - 1] + 36; // Add button height
-    const newWidth = Math.max(initialWidth, lastColX + margin.right);
-    const newHeight = Math.max(initialHeight, lastRowY + margin.bottom + (showWADD ? 36 : 0));
-    this.svg.attr("width", newWidth).attr("height", newHeight);
 
     const HEADER_H = 36;
     const col = this.gCols
@@ -146,18 +143,9 @@ export class DecisionLayoutChart {
       .attr("class", "col");
 
     colEnter.append("rect").attr("class", "header-bg").attr("rx", 6).attr("ry", 6);
-    colEnter.append("text")
-      .attr("class", "header-text")
-      .attr("text-anchor", "middle")
-      .attr("dominant-baseline", "middle")
-      .style("font-weight", 700)
-      .style("fill", colors.headerFg);
-    colEnter.append("foreignObject").attr("class", "header-input");
+    colEnter.append("foreignObject").attr("class", "header-label");
     colEnter.append("rect").attr("class", "resize-handle").style("cursor", "col-resize").attr("fill", "transparent");
-    colEnter.append("text").attr("class", "remove-btn")
-      .style("cursor", "pointer")
-      .style("fill", colors.headerFg)
-      .text("×");
+    colEnter.append("rect").attr("class", "remove-btn").style("cursor", "pointer").attr("fill", "#ff4d4d");
 
     const colAll = colEnter.merge(col);
     colAll.attr("transform", (_, i) => `translate(${colLefts[i]}, ${margin.top - HEADER_H})`);
@@ -167,56 +155,54 @@ export class DecisionLayoutChart {
       .attr("width", (_, i) => colWidths[i])
       .attr("height", HEADER_H)
       .attr("fill", colors.headerBg);
-    colAll.select("text.header-text")
-      .attr("x", (_, i) => colWidths[i] / 2 - 10)
-      .attr("y", HEADER_H / 2)
-      .text(d => d.label)
-      .style("pointer-events", "auto")
-      .on("dblclick", (event, d) => {
-        if (this.editingId) return;
-        this.editingId = d.id;
-        this.render();
-      });
-    colAll.select("foreignObject.header-input")
-      .attr("x", 10)
-      .attr("y", -2)
-      .attr("width", (_, i) => colWidths[i] - 20)
-      .attr("height", HEADER_H)
-      .style("display", d => this.editingId === d.id ? "block" : "none")
-      .html(d => `
-        <input type="text" value="${d.label}" style="width:100%; height:100%; background:#1a2a5e; color:#fff; border:1px solid #3f51b5; border-radius:4px; padding:0 4px;" />
-      `)
-      .on("blur", (event, d) => {
-        const input = (event.target as HTMLElement).querySelector("input")!;
-        const newLabel = input.value.trim() || d.label;
-        this.options = this.options.map(o => o.id === d.id ? { ...o, label: newLabel } : o);
-        this.editingId = null;
-        this.render();
-        if (this.onUpdate) this.onUpdate({ options: [...this.options] });
-      })
-      .select("input")
-      .on("keypress", (event, d) => {
-        if (event.key === "Enter") {
-          const input = event.target as HTMLInputElement;
-          const newLabel = input.value.trim() || d.label;
-          this.options = this.options.map(o => o.id === d.id ? { ...o, label: newLabel } : o);
+
+    colAll.each(function(d, i) {
+      const fo = select(this).select<SVGForeignObjectElement>("foreignObject.header-label");
+      fo.attr("x", 0)
+        .attr("y", -2)
+        .attr("width", colWidths[i])
+        .attr("height", HEADER_H);
+      
+      const isEditing = d.id === this.editingId;
+      fo.html(isEditing
+        ? `<input type="text" value="${d.label}" style="width:100%; height:100%; box-sizing:border-box; text-align:center; font-weight:700; color:${colors.headerFg}; background:transparent; border:none;">`
+        : `<div style="width:100%; height:100%; display:flex; align-items:center; justify-content:center; font-weight:700; color:${colors.headerFg};">${d.label}</div>`
+      );
+
+      const input = fo.select("input");
+      if (isEditing) {
+        input.node()?.focus();
+        input.on("input", () => {
+          d.label = input.node()?.value.trim() || `Option ${i + 1}`;
+          if (this.onUpdate) this.onUpdate({ options: [...this.options] });
+        });
+        input.on("blur", () => {
           this.editingId = null;
           this.render();
-          if (this.onUpdate) this.onUpdate({ options: [...this.options] });
-        }
-      });
+        });
+        input.on("keypress", (event) => {
+          if (event.key === "Enter") {
+            this.editingId = null;
+            this.render();
+          }
+        });
+      }
+    }.bind(this));
+
     colAll.select("rect.resize-handle")
       .attr("x", (_, i) => colWidths[i] - 8)
       .attr("y", -2)
       .attr("width", 16)
       .attr("height", HEADER_H);
-    colAll.select("text.remove-btn")
-      .attr("x", (_, i) => colWidths[i] - 20)
-      .attr("y", HEADER_H / 2)
-      .attr("text-anchor", "middle")
-      .style("font-size", "16px")
-      .style("font-weight", "bold")
+
+    colAll.select("rect.remove-btn")
+      .attr("x", (_, i) => colWidths[i] - 24)
+      .attr("y", -HEADER_H / 2 - 6)
+      .attr("width", 16)
+      .attr("height", 16)
+      .attr("rx", 3)
       .on("click", (event, d) => {
+        if (this.options.length <= 2) return; // Minimum 2 options
         this.options = this.options.filter(o => o.id !== d.id);
         const newScores: Scores = {};
         Object.keys(this.scores).forEach(fid => {
@@ -229,8 +215,13 @@ export class DecisionLayoutChart {
         });
         this.scores = newScores;
         this.render();
-        if (this.onUpdate) this.onUpdate({ options: [...this.options], scores: { ...this.scores } });
+        if (this.onUpdate) this.onUpdate({ options: [...this.options], scores: {...this.scores} });
       });
+
+    colAll.select("foreignObject.header-label").on("dblclick", (event, d) => {
+      this.editingId = d.id;
+      this.render();
+    });
 
     colAll.select<SVGRectElement>("rect.resize-handle").call(
       drag<Option>()
@@ -309,18 +300,9 @@ export class DecisionLayoutChart {
 
     const rowEnter = row.enter().append("g").attr("class", "row");
     rowEnter.append("rect").attr("class", "row-bg").attr("rx", 6).attr("ry", 6);
-    rowEnter.append("text")
-      .attr("class", "row-text")
-      .attr("text-anchor", "middle")
-      .attr("dominant-baseline", "middle")
-      .style("font-weight", 600)
-      .style("fill", colors.headerFg);
-    rowEnter.append("foreignObject").attr("class", "row-input");
+    rowEnter.append("foreignObject").attr("class", "row-label");
     rowEnter.append("rect").attr("class", "resize-handle").style("cursor", "row-resize").attr("fill", "transparent");
-    rowEnter.append("text").attr("class", "remove-btn")
-      .style("cursor", "pointer")
-      .style("fill", colors.headerFg)
-      .text("×");
+    rowEnter.append("rect").attr("class", "remove-btn").style("cursor", "pointer").attr("fill", "#ff4d4d");
 
     const rowAll = rowEnter.merge(row);
     rowAll.attr("transform", (_, i) => `translate(0, ${rowTops[i]})`);
@@ -331,56 +313,54 @@ export class DecisionLayoutChart {
       .attr("height", (_, i) => rowHeights[i] - ROW_GAP)
       .attr("fill", colors.headerBg)
       .style("cursor", "move");
-    rowAll.select("text.row-text")
-      .attr("x", margin.left / 2 - 10)
-      .attr("y", (_, i) => rowHeights[i] / 2)
-      .text(d => d.label)
-      .style("pointer-events", "auto")
-      .on("dblclick", (event, d) => {
-        if (this.editingId) return;
-        this.editingId = d.id;
-        this.render();
-      });
-    rowAll.select("foreignObject.row-input")
-      .attr("x", 10)
-      .attr("y", ROW_GAP / 2)
-      .attr("width", margin.left - 25)
-      .attr("height", (_, i) => rowHeights[i] - ROW_GAP)
-      .style("display", d => this.editingId === d.id ? "block" : "none")
-      .html(d => `
-        <input type="text" value="${d.label}" style="width:100%; height:100%; background:#1a2a5e; color:#fff; border:1px solid #3f51b5; border-radius:4px; padding:0 4px;" />
-      `)
-      .on("blur", (event, d) => {
-        const input = (event.target as HTMLElement).querySelector("input")!;
-        const newLabel = input.value.trim() || d.label;
-        this.factors = this.factors.map(f => f.id === d.id ? { ...f, label: newLabel } : f);
-        this.editingId = null;
-        this.render();
-        if (this.onUpdate) this.onUpdate({ factors: [...this.factors] });
-      })
-      .select("input")
-      .on("keypress", (event, d) => {
-        if (event.key === "Enter") {
-          const input = event.target as HTMLInputElement;
-          const newLabel = input.value.trim() || d.label;
-          this.factors = this.factors.map(f => f.id === d.id ? { ...f, label: newLabel } : f);
+
+    rowAll.each(function(d, i) {
+      const fo = select(this).select<SVGForeignObjectElement>("foreignObject.row-label");
+      fo.attr("x", 0)
+        .attr("y", ROW_GAP / 2)
+        .attr("width", margin.left - 5)
+        .attr("height", rowHeights[i] - ROW_GAP);
+      
+      const isEditing = d.id === this.editingId;
+      fo.html(isEditing
+        ? `<input type="text" value="${d.label}" style="width:100%; height:100%; box-sizing:border-box; text-align:center; font-weight:600; color:${colors.headerFg}; background:transparent; border:none;">`
+        : `<div style="width:100%; height:100%; display:flex; align-items:center; justify-content:center; font-weight:600; color:${colors.headerFg};">${d.label}</div>`
+      );
+
+      const input = fo.select("input");
+      if (isEditing) {
+        input.node()?.focus();
+        input.on("input", () => {
+          d.label = input.node()?.value.trim() || `Factor ${i + 1}`;
+          if (this.onUpdate) this.onUpdate({ factors: [...this.factors] });
+        });
+        input.on("blur", () => {
           this.editingId = null;
           this.render();
-          if (this.onUpdate) this.onUpdate({ factors: [...this.factors] });
-        }
-      });
+        });
+        input.on("keypress", (event) => {
+          if (event.key === "Enter") {
+            this.editingId = null;
+            this.render();
+          }
+        });
+      }
+    }.bind(this));
+
     rowAll.select("rect.resize-handle")
       .attr("x", 0)
       .attr("width", margin.left - 5)
       .attr("y", (_, i) => rowHeights[i] - 8)
       .attr("height", 16);
-    rowAll.select("text.remove-btn")
-      .attr("x", margin.left - 15)
-      .attr("y", (_, i) => rowHeights[i] / 2)
-      .attr("text-anchor", "middle")
-      .style("font-size", "16px")
-      .style("font-weight", "bold")
+
+    rowAll.select("rect.remove-btn")
+      .attr("x", margin.left - 24)
+      .attr("y", (_, i) => rowHeights[i] / 2 - 6)
+      .attr("width", 16)
+      .attr("height", 16)
+      .attr("rx", 3)
       .on("click", (event, d) => {
+        if (this.factors.length <= 1) return; // Minimum 1 factor
         this.factors = this.factors.filter(f => f.id !== d.id);
         const newScores: Scores = {};
         this.factors.forEach(f => {
@@ -388,8 +368,13 @@ export class DecisionLayoutChart {
         });
         this.scores = newScores;
         this.render();
-        if (this.onUpdate) this.onUpdate({ factors: [...this.factors], scores: { ...this.scores } });
+        if (this.onUpdate) this.onUpdate({ factors: [...this.factors], scores: {...this.scores} });
       });
+
+    rowAll.select("foreignObject.row-label").on("dblclick", (event, d) => {
+      this.editingId = d.id;
+      this.render();
+    });
 
     rowAll.select<SVGRectElement>("rect.resize-handle").call(
       drag<Factor>()
@@ -581,95 +566,54 @@ export class DecisionLayoutChart {
       this.gWADD.selectAll("*").remove();
     }
 
-    const controls = this.gControls.selectAll<SVGGElement, string>("g.control")
-      .data(this.options.length < MAX_ITEMS ? ["add-option"] : [], d => d);
+    const controls = this.gControls.selectAll<SVGGElement, any>("g.control").data([
+      { type: "add-option", x: margin.left + innerW - 30, y: margin.top - HEADER_H - 10 },
+      { type: "add-factor", x: 10, y: margin.top + innerH + (showWADD ? 36 : 0) - 10 }
+    ]);
 
     const controlsEnter = controls.enter().append("g").attr("class", "control");
-    controlsEnter.append("rect")
-      .attr("fill", colors.headerBg)
-      .attr("rx", 6)
-      .attr("ry", 6)
-      .style("cursor", "pointer");
+    controlsEnter.append("rect").attr("class", "control-bg").style("cursor", "pointer").attr("fill", "#4CAF50").attr("rx", 3);
     controlsEnter.append("text")
       .attr("text-anchor", "middle")
       .attr("dominant-baseline", "middle")
-      .style("fill", colors.headerFg)
       .style("font-weight", 600)
-      .style("cursor", "pointer")
-      .text("+");
+      .style("fill", colors.headerFg)
+      .text(d => d.type === "add-option" ? "+ Option" : "+ Factor");
 
     const controlsAll = controlsEnter.merge(controls);
-    controlsAll.attr("transform", () => {
-      const lastColIdx = this.options.length ? this.options.length - 1 : 0;
-      const x = this.options.length ? colLefts[lastColIdx] + colWidths[lastColIdx] : margin.left;
-      return `translate(${x}, ${margin.top - HEADER_H})`;
-    });
-    controlsAll.select("rect")
-      .attr("x", 0)
-      .attr("y", -2)
-      .attr("width", 36)
-      .attr("height", HEADER_H);
+    controlsAll.attr("transform", d => `translate(${d.x}, ${d.y})`);
+    controlsAll.select("rect.control-bg")
+      .attr("x", -40)
+      .attr("y", -12)
+      .attr("width", 80)
+      .attr("height", 24);
     controlsAll.select("text")
-      .attr("x", 18)
-      .attr("y", HEADER_H / 2);
-    controlsAll.on("click", () => {
-      if (this.options.length >= MAX_ITEMS) return;
-      const newId = `o${Date.now()}`;
-      this.options.push({ id: newId, label: `Option ${this.options.length + 1}`, weight: 1.5 });
-      this.scores = { ...this.scores };
-      this.factors.forEach(f => {
-        this.scores[f.id] = { ...this.scores[f.id], [newId]: 0 };
-      });
-      this.render();
-      if (this.onUpdate) this.onUpdate({ options: [...this.options], scores: { ...this.scores } });
+      .attr("x", 0)
+      .attr("y", 0);
+
+    controlsAll.select("rect.control-bg").on("click", (event, d) => {
+      if (d.type === "add-option" && this.options.length < MAX_CHOICES) {
+        const newId = `o${this.options.length + 1}`;
+        this.options.push({ id: newId, label: `Option ${this.options.length + 1}`, weight: 1.5 });
+        this.factors.forEach(f => {
+          this.scores[f.id] = this.scores[f.id] || {};
+          this.scores[f.id][newId] = 0;
+        });
+        this.render();
+        if (this.onUpdate) this.onUpdate({ options: [...this.options], scores: {...this.scores} });
+      } else if (d.type === "add-factor") {
+        const newId = `f${this.factors.length + 1}`;
+        this.factors.push({ id: newId, label: `Factor ${this.factors.length + 1}`, weight: 1.5 });
+        this.scores[newId] = {};
+        this.options.forEach(o => {
+          this.scores[newId][o.id] = 0;
+        });
+        this.render();
+        if (this.onUpdate) this.onUpdate({ factors: [...this.factors], scores: {...this.scores} });
+      }
     });
 
     controls.exit().remove();
-
-    const factorControls = this.gControls.selectAll<SVGGElement, string>("g.factor-control")
-      .data(this.factors.length < MAX_ITEMS ? ["add-factor"] : [], d => d);
-
-    const factorControlsEnter = factorControls.enter().append("g").attr("class", "factor-control");
-    factorControlsEnter.append("rect")
-      .attr("fill", colors.headerBg)
-      .attr("rx", 6)
-      .attr("ry", 6)
-      .style("cursor", "pointer");
-    factorControlsEnter.append("text")
-      .attr("text-anchor", "middle")
-      .attr("dominant-baseline", "middle")
-      .style("fill", colors.headerFg)
-      .style("font-weight", 600)
-      .style("cursor", "pointer")
-      .text("+");
-
-    const factorControlsAll = factorControlsEnter.merge(factorControls);
-    factorControlsAll.attr("transform", () => {
-      const lastRowIdx = this.factors.length ? this.factors.length - 1 : 0;
-      const y = this.factors.length ? rowTops[lastRowIdx] + rowHeights[lastRowIdx] : margin.top;
-      return `translate(0, ${y})`;
-    });
-    factorControlsAll.select("rect")
-      .attr("x", 0)
-      .attr("width", margin.left - 5)
-      .attr("y", 0)
-      .attr("height", 36);
-    factorControlsAll.select("text")
-      .attr("x", margin.left / 2)
-      .attr("y", 18);
-    factorControlsAll.on("click", () => {
-      if (this.factors.length >= MAX_ITEMS) return;
-      const newId = `f${Date.now()}`;
-      this.factors.push({ id: newId, label: `Factor ${this.factors.length + 1}`, weight: 1.5 });
-      this.scores[newId] = {};
-      this.options.forEach(o => {
-        this.scores[newId][o.id] = 0;
-      });
-      this.render();
-      if (this.onUpdate) this.onUpdate({ factors: [...this.factors], scores: { ...this.scores } });
-    });
-
-    factorControls.exit().remove();
 
     return this;
   }
