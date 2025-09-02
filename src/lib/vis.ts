@@ -2,6 +2,7 @@ import { select, Selection } from "d3-selection";
 import { scaleBand } from "d3-scale";
 import { sum } from "d3-array";
 import { drag } from "d3-drag";
+import { transition } from "d3";
 
 export type Factor = { id: string; label: string; weight: number };
 export type Option = { id: string; label: string; weight: number };
@@ -86,12 +87,15 @@ export class DecisionLayoutChart {
     const waddScores: Record<string, number> = {};
     this.options.forEach(o => {
       let score = 0;
+      let totalWeight = 0;
       this.factors.forEach(f => {
-        const factorWeight = f.weight;
+        const factorWeight = Math.max(0, f.weight);
+        totalWeight += factorWeight;
         const optionScore = this.scores[f.id]?.[o.id] ?? 0;
         score += factorWeight * optionScore;
       });
-      waddScores[o.id] = Number(score.toFixed(2));
+      const norm = totalWeight ? score / totalWeight : 0;
+      waddScores[o.id] = Number(norm.toFixed(2));
     });
     return waddScores;
   }
@@ -166,16 +170,16 @@ export class DecisionLayoutChart {
       .text("×");
 
     const colAll = colEnter.merge(col);
-    colAll.attr("transform", (_, i) => `translate(${colLefts[i]}, ${margin.top - HEADER_H})`);
+    const t = transition().duration(150);
+    colAll.transition(t).attr("transform", (_, i) => `translate(${colLefts[i]}, ${margin.top - HEADER_H})`);
     colAll.select("rect.header-bg")
+      .transition(t)
       .attr("x", COL_GAP / 2)
       .attr("y", -2)
       .attr("width", (_, i) => colWidths[i] - COL_GAP)
       .attr("height", HEADER_H)
       .attr("fill", colors.headerBg);
-    colAll.select("text.header-text")
-      .attr("x", (_, i) => colWidths[i] / 2 - 10)
-      .attr("y", HEADER_H / 2)
+    const headerText = colAll.select("text.header-text")
       .text(d => d.label)
       .style("pointer-events", "auto")
       .on("dblclick", (event, d) => {
@@ -183,16 +187,21 @@ export class DecisionLayoutChart {
         this.editingId = d.id;
         this.render();
       });
-    colAll.select("foreignObject.header-input")
-      .attr("x", COL_GAP / 2 + 10)
-      .attr("y", -2)
-      .attr("width", (_, i) => colWidths[i] - COL_GAP - 20)
-      .attr("height", HEADER_H)
+    headerText.transition(t)
+      .attr("x", (_, i) => colWidths[i] / 2 - 10)
+      .attr("y", HEADER_H / 2);
+
+    const headerInput = colAll.select("foreignObject.header-input")
       .style("display", d => this.editingId === d.id ? "block" : "none")
       .html(d => `
         <input type="text" value="${d.label}" style="width:100%; height:100%; background:#1a2a5e; color:#fff; border:1px solid #3f51b5; border-radius:4px; padding:0 4px;" />
-      `)
-      .on("blur", (event, d) => {
+      `);
+    headerInput.transition(t)
+      .attr("x", COL_GAP / 2 + 10)
+      .attr("y", -2)
+      .attr("width", (_, i) => colWidths[i] - COL_GAP - 20)
+      .attr("height", HEADER_H);
+    headerInput.on("blur", (event, d) => {
         const input = (event.target as HTMLElement).querySelector("input")!;
         const newLabel = input.value.trim() || d.label;
         this.options = this.options.map(o => o.id === d.id ? { ...o, label: newLabel } : o);
@@ -212,6 +221,7 @@ export class DecisionLayoutChart {
         }
       });
     colAll.select("rect.resize-handle")
+      .transition(t)
       .attr("x", (_, i) => colWidths[i] - COL_GAP / 2 - 8)
       .attr("y", -2)
       .attr("width", 16)
@@ -274,25 +284,22 @@ export class DecisionLayoutChart {
     colAll.select<SVGRectElement>("rect.header-bg").style("cursor", "move").call(
       drag<Option>()
         .on("start", (event, d) => {
-          select(event.sourceEvent.target.parentNode as SVGGElement).raise();
+          const g = select(event.sourceEvent.target.parentNode as SVGGElement);
+          g.raise();
           const idx = this.options.findIndex(o => o.id === d.id);
           this.dragInfo = {
             type: "col-reorder",
             startX: event.x,
             idx,
             origLeft: colLefts[idx],
-          };
+            newIdx: idx,
+          } as any;
         })
-        .on("drag", (event, d) => {
-          const translateX = colLefts[this.dragInfo.idx] + event.x - this.dragInfo.startX;
-          select(event.sourceEvent.target.parentNode as SVGGElement).attr(
-            "transform",
-            `translate(${translateX}, ${margin.top - HEADER_H})`
-          );
-        })
-        .on("end", (event, d) => {
-          const draggedLeft = this.dragInfo.origLeft + event.x - this.dragInfo.startX;
-          const draggedCenter = draggedLeft + colWidths[this.dragInfo.idx] / 2;
+        .on("drag", (event) => {
+          const g = select(event.sourceEvent.target.parentNode as SVGGElement);
+          const translateX = this.dragInfo.origLeft + event.x - this.dragInfo.startX;
+          g.attr("transform", `translate(${translateX}, ${margin.top - HEADER_H})`);
+          const draggedCenter = translateX + colWidths[this.dragInfo.idx] / 2;
           let newIdx = 0;
           for (let i = 0; i < colLefts.length; i++) {
             if (i === this.dragInfo.idx) continue;
@@ -300,8 +307,24 @@ export class DecisionLayoutChart {
             if (draggedCenter > center) newIdx = i + 1;
           }
           if (newIdx > this.dragInfo.idx) newIdx--;
+          if (newIdx !== this.dragInfo.newIdx) {
+            this.dragInfo.newIdx = newIdx;
+            this.gCols
+              .selectAll<SVGGElement, Option>("g.col")
+              .filter((_, i) => i !== this.dragInfo.idx)
+              .transition().duration(150)
+              .attr("transform", (d, i) => {
+                let x = colLefts[i];
+                if (i > this.dragInfo.idx && i <= newIdx) x -= colWidths[this.dragInfo.idx];
+                else if (i < this.dragInfo.idx && i >= newIdx) x += colWidths[this.dragInfo.idx];
+                return `translate(${x}, ${margin.top - HEADER_H})`;
+              });
+          }
+        })
+        .on("end", () => {
+          const finalIdx = this.dragInfo.newIdx;
           const moved = this.options.splice(this.dragInfo.idx, 1)[0];
-          this.options.splice(newIdx, 0, moved);
+          this.options.splice(finalIdx, 0, moved);
           this.render();
           if (this.onUpdate) this.onUpdate({ options: [...this.options] });
         })
@@ -329,8 +352,9 @@ export class DecisionLayoutChart {
       .text("×");
 
     const rowAll = rowEnter.merge(row);
-    rowAll.attr("transform", (_, i) => `translate(0, ${rowTops[i]})`);
+    rowAll.transition(t).attr("transform", (_, i) => `translate(0, ${rowTops[i]})`);
     rowAll.select("rect.row-bg")
+      .transition(t)
       .attr("x", 0)
       .attr("width", margin.left - 5)
       .attr("y", ROW_GAP / 2)
@@ -433,22 +457,22 @@ export class DecisionLayoutChart {
     rowAll.select<SVGRectElement>("rect.row-bg").call(
       drag<Factor>()
         .on("start", (event, d) => {
-          select(event.sourceEvent.target.parentNode as SVGGElement).raise();
+          const g = select(event.sourceEvent.target.parentNode as SVGGElement);
+          g.raise();
           const idx = this.factors.findIndex(f => f.id === d.id);
           this.dragInfo = {
             type: "row-reorder",
             startY: event.y,
             idx,
             origTop: rowTops[idx],
-          };
+            newIdx: idx,
+          } as any;
         })
-        .on("drag", (event, d) => {
-          const translateY = rowTops[this.dragInfo.idx] + event.y - this.dragInfo.startY;
-          select(event.sourceEvent.target.parentNode as SVGGElement).attr("transform", `translate(0, ${translateY})`);
-        })
-        .on("end", (event, d) => {
-          const draggedTop = this.dragInfo.origTop + event.y - this.dragInfo.startY;
-          const draggedCenter = draggedTop + rowHeights[this.dragInfo.idx] / 2;
+        .on("drag", (event) => {
+          const g = select(event.sourceEvent.target.parentNode as SVGGElement);
+          const translateY = this.dragInfo.origTop + event.y - this.dragInfo.startY;
+          g.attr("transform", `translate(0, ${translateY})`);
+          const draggedCenter = translateY + rowHeights[this.dragInfo.idx] / 2;
           let newIdx = 0;
           for (let i = 0; i < rowTops.length; i++) {
             if (i === this.dragInfo.idx) continue;
@@ -456,8 +480,24 @@ export class DecisionLayoutChart {
             if (draggedCenter > center) newIdx = i + 1;
           }
           if (newIdx > this.dragInfo.idx) newIdx--;
+          if (newIdx !== this.dragInfo.newIdx) {
+            this.dragInfo.newIdx = newIdx;
+            this.gRows
+              .selectAll<SVGGElement, Factor>("g.row")
+              .filter((_, i) => i !== this.dragInfo.idx)
+              .transition().duration(150)
+              .attr("transform", (d, i) => {
+                let y = rowTops[i];
+                if (i > this.dragInfo.idx && i <= newIdx) y -= rowHeights[this.dragInfo.idx];
+                else if (i < this.dragInfo.idx && i >= newIdx) y += rowHeights[this.dragInfo.idx];
+                return `translate(0, ${y})`;
+              });
+          }
+        })
+        .on("end", () => {
+          const finalIdx = this.dragInfo.newIdx;
           const moved = this.factors.splice(this.dragInfo.idx, 1)[0];
-          this.factors.splice(newIdx, 0, moved);
+          this.factors.splice(finalIdx, 0, moved);
           this.render();
           if (this.onUpdate) this.onUpdate({ factors: [...this.factors] });
         })
@@ -482,9 +522,10 @@ export class DecisionLayoutChart {
     cellsEnter.append("rect").attr("class", "score-handle").style("cursor", "col-resize").attr("fill", "transparent");
 
     const all = cellsEnter.merge(cells);
-    all.attr("transform", d => `translate(${colLefts[d.cidx]}, ${rowTops[d.ridx]})`);
+    all.transition(t).attr("transform", d => `translate(${colLefts[d.cidx]}, ${rowTops[d.ridx]})`);
 
     all.select("rect.cell-bg")
+      .transition(t)
       .attr("x", COL_GAP / 2)
       .attr("y", ROW_GAP / 2)
       .attr("width", d => colWidths[d.cidx] - COL_GAP)
@@ -501,18 +542,21 @@ export class DecisionLayoutChart {
       const wNeg = w - wPos;
 
       g.select<SVGRectElement>("rect.cell-pos")
+        .transition(t)
         .attr("x", x0 + 1)
         .attr("y", y + 1)
         .attr("width", Math.max(0, wPos - 1))
         .attr("height", Math.max(0, h - 2));
 
       g.select<SVGRectElement>("rect.cell-neg")
+        .transition(t)
         .attr("x", x0 + wPos + 1)
         .attr("y", y + 1)
         .attr("width", Math.max(0, wNeg - 2))
         .attr("height", Math.max(0, h - 2));
 
       g.select<SVGRectElement>("rect.score-handle")
+        .transition(t)
         .attr("x", x0 + wPos - 2.5)
         .attr("y", y + 1)
         .attr("width", 5)
@@ -575,17 +619,19 @@ export class DecisionLayoutChart {
         .style("fill", colors.headerFg);
 
       const waddAll = waddEnter.merge(wadd);
-      waddAll.attr("transform", (_, i) => `translate(${colLefts[i]}, ${margin.top + innerH})`);
+      waddAll.transition(t).attr("transform", (_, i) => `translate(${colLefts[i]}, ${margin.top + innerH})`);
       waddAll.select("rect.wadd-bg")
+        .transition(t)
         .attr("x", COL_GAP / 2)
         .attr("y", 2)
         .attr("width", (_, i) => colWidths[i] - COL_GAP)
         .attr("height", 36)
         .attr("fill", colors.headerBg);
       waddAll.select("text")
+        .transition(t)
         .attr("x", (_, i) => colWidths[i] / 2)
         .attr("y", 20)
-        .text(d => `WADD: ${waddScores[d.id]}`);
+        .text(d => `WADD: ${waddScores[d.id].toFixed(2)}`);
 
       wadd.exit().remove();
     } else {
