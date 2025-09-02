@@ -2,6 +2,7 @@ import { select, Selection } from "d3-selection";
 import { scaleBand } from "d3-scale";
 import { sum } from "d3-array";
 import { drag } from "d3-drag";
+import { transition } from "d3";
 
 export type Factor = { id: string; label: string; weight: number };
 export type Option = { id: string; label: string; weight: number };
@@ -169,7 +170,8 @@ export class DecisionLayoutChart {
       .text("×");
 
     const colAll = colEnter.merge(col);
-    const t = this.svg.transition().duration(150);
+    const t = transition().duration(150);
+
     colAll.transition(t).attr("transform", (_, i) => `translate(${colLefts[i]}, ${margin.top - HEADER_H})`);
     colAll.select("rect.header-bg")
       .transition(t)
