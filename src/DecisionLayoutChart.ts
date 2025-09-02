@@ -517,8 +517,21 @@ export class DecisionLayoutChart {
           const delta = event.x - this.dragInfo.startX;
           let newWPos = Math.max(0, Math.min(this.dragInfo.w, this.dragInfo.startWPos + delta));
           this.dragInfo.g.select("rect.cell-pos").attr("width", newWPos - 1);
-          this.dragInfo.g.select("rect.cell-neg").attr("x", newWPos + 1).attr("width", this.dragInfo.w - newWPos - 2);
+          this.dragInfo.g
+            .select("rect.cell-neg")
+            .attr("x", newWPos + 1)
+            .attr("width", this.dragInfo.w - newWPos - 2);
           this.dragInfo.g.select("rect.score-handle").attr("x", newWPos - 2.5);
+
+          const newScore = 2 * (newWPos / this.dragInfo.w) - 1;
+          this.updateScore(this.dragInfo.d.fid, this.dragInfo.d.oid, newScore);
+          if (showWADD) {
+            const waddScores = this.calculateWADDScores();
+            this.gWADD
+              .selectAll<SVGGElement, Option>("g.wadd")
+              .select("text")
+              .text(d => `WADD: ${waddScores[d.id]}`);
+          }
         })
         .on("end", () => {
           const newWPos = Number(this.dragInfo.g.select("rect.cell-pos").attr("width")) + 1;
