@@ -171,6 +171,7 @@ export class DecisionLayoutChart {
 
     const colAll = colEnter.merge(col);
     const t = transition().duration(150);
+
     colAll.transition(t).attr("transform", (_, i) => `translate(${colLefts[i]}, ${margin.top - HEADER_H})`);
     colAll.select("rect.header-bg")
       .transition(t)
