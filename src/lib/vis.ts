@@ -21,7 +21,7 @@ export type LayoutConfig = {
 
 const DEFAULTS: Required<Omit<LayoutConfig, "width" | "height">> = {
   margin: { top: 48, right: 16, bottom: 32, left: 180 },
-  padding: { row: 4, col: 4 },
+  padding: { row: 8, col: 15 },
   colors: {
     pos: "#04b254",
     neg: "#6b3b1f",
