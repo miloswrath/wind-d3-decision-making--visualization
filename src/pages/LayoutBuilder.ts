@@ -1,410 +1,80 @@
 import type { Page } from "../router";
-import { DecisionLayoutChart } from "../lib/vis";
 
-type UIState = {
-  options: { id: string; label: string; uiImportance: number }[];
-  factors: { id: string; label: string; uiImportance: number }[];
-  scoresUI: Record<string, Record<string, number>>;
+const DEFAULT_LAYOUT = "vanilla";
+
+type LayoutModule = {
+  default: Page;
+  meta?: { name?: string };
 };
 
-const MAX_CHOICES = 5;
+type RegisteredLayout = {
+  name: string;
+  render: Page;
+};
 
-const mapLikertToSigned = (ui: number) => (ui - 3) / 2;
-const mapImportanceToWeight = (ui: number) => 1 + (ui - 1) / 4;
-const weightToImportance = (w: number) => Math.round(1 + (w - 1) * 4);
-const signedToLikert = (s: number) => Math.round(3 + s * 2);
+const modules = import.meta.glob<LayoutModule>("../vis/*.ts", { eager: true });
+const registry = new Map<string, RegisteredLayout>();
 
-const LayoutBuilder: Page = (root) => {
-  root.innerHTML = `
-    <section class="card">
-      <h1 class="h1">Build your decision layout</h1>
-      <ol style="margin:0 0 12px 1.1rem; color:var(--muted)">
-        <li>Add up to 5 choices & set importance</li>
-        <li>Add factors and set importance (1–5)</li>
-        <li>Rate each choice per factor (1–5)</li>
-      </ol>
-      <div style="margin-bottom:12px">
-        <label style="display:flex; align-items:center; gap:8px; color:var(--fg)">
-          <input type="checkbox" id="showWADD"> Show WADD Scores
-        </label>
-      </div>
-      <div id="step"></div>
-      <div style="display:flex; gap:.5rem; margin-top:12px">
-        <button id="backBtn" style="display:none">Back</button>
-        <button id="nextBtn">Next</button>
-      </div>
-    </section>
-    <section class="card" style="margin-top:12px">
-      <h2 class="h1" style="font-size:1.2rem">Preview</h2>
-      <div id="viz" style="margin-top:8px; background:#0f1730; border-radius:12px; padding:8px;"></div>
-    </section>
-  `;
+for (const [path, mod] of Object.entries(modules)) {
+  const fileName = path.split("/").pop() ?? "";
+  const inferredName = fileName.replace(/\.[^.]+$/, "");
+  const declaredName = mod.meta?.name ?? inferredName;
+  if (!mod.default || !declaredName) continue;
 
-  const stepHost = root.querySelector<HTMLDivElement>("#step")!;
-  const backBtn = root.querySelector<HTMLButtonElement>("#backBtn")!;
-  const nextBtn = root.querySelector<HTMLButtonElement>("#nextBtn")!;
-  const vizEl = root.querySelector<HTMLDivElement>("#viz")!;
-  const showWADDCheckbox = root.querySelector<HTMLInputElement>("#showWADD")!;
+  const layout: RegisteredLayout = { name: declaredName, render: mod.default };
+  const aliases = new Set<string>([
+    declaredName.toLowerCase(),
+    inferredName.toLowerCase(),
+  ]);
+  if (mod.meta?.name) aliases.add(mod.meta.name.toLowerCase());
 
-  let showWADD = false;
-  const chart = new DecisionLayoutChart(vizEl, {
-    width: 1100,
-    height: 600,
-    showWADD,
-    onUpdate: (updates) => {
-      if (updates.factors) {
-        const idToFactor = new Map(state.factors.map(f => [f.id, f]));
-        updates.factors.forEach(newF => {
-          const existing = idToFactor.get(newF.id);
-          if (existing) {
-            existing.label = newF.label;
-            existing.uiImportance = weightToImportance(newF.weight);
-          }
-        });
-        state.factors = updates.factors.map(newF => idToFactor.get(newF.id)!);
-      }
-      if (updates.options) {
-        const idToOption = new Map(state.options.map(o => [o.id, o]));
-        updates.options.forEach(newO => {
-          const existing = idToOption.get(newO.id);
-          if (existing) {
-            existing.label = newO.label;
-            existing.uiImportance = weightToImportance(newO.weight);
-          }
-        });
-        state.options = updates.options.map(newO => idToOption.get(newO.id)!);
-      }
-      if (updates.scores) {
-        for (const fid in updates.scores) {
-          state.scoresUI[fid] ??= {};
-          for (const oid in updates.scores[fid]) {
-            state.scoresUI[fid][oid] = signedToLikert(updates.scores[fid][oid]);
-          }
-        }
-      }
-      reconcileScores(state, state);
-      renderCurrentStep();
-      renderPreview();
-    },
-  });
-
-  showWADDCheckbox.addEventListener("change", () => {
-    showWADD = showWADDCheckbox.checked;
-    chart.cfg.showWADD = showWADD;
-    chart.render();
-  });
-
-  let optSeq = 0, facSeq = 0;
-  const newOptId = () => `o${++optSeq}`;
-  const newFacId = () => `f${++facSeq}`;
-
-  const state: UIState = {
-    options: [
-      { id: newOptId(), label: "Option A", uiImportance: 3 },
-      { id: newOptId(), label: "Option B", uiImportance: 3 },
-    ],
-    factors: [
-      { id: newFacId(), label: "Factor 1", uiImportance: 3 },
-      { id: newFacId(), label: "Factor 2", uiImportance: 3 },
-    ],
-    scoresUI: {},
-  };
-
-  const deepClone = <T,>(x: T): T => JSON.parse(JSON.stringify(x));
-
-  function reconcileScores(prev: UIState, next: UIState) {
-    const newScores: Record<string, Record<string, number>> = {};
-    const prevScores = prev.scoresUI || {};
-    for (const f of next.factors) {
-      newScores[f.id] = {};
-      for (const o of next.options) {
-        const kept = prevScores[f.id]?.[o.id];
-        newScores[f.id][o.id] = kept ?? 3;
-      }
-    }
-    next.scoresUI = newScores;
+  for (const alias of aliases) {
+    if (alias) registry.set(alias, layout);
   }
+}
 
-  let currentStep = 1 as 1 | 2 | 3;
+const uniqueNames = Array.from(new Set(Array.from(registry.values()).map(l => l.name.toLowerCase())));
 
-  function renderStep1() {
-    stepHost.innerHTML = `
-      <h2 class="h1" style="font-size:1.2rem">Step 1 — Add choices (max ${MAX_CHOICES})</h2>
-      <div id="choices"></div>
-      <div style="margin-top:8px">
-        <button id="addChoiceBtn">Add choice</button>
-      </div>
-      <p style="color:var(--muted); margin-top:8px">You can rename choices and set importance anytime.</p>
+const LayoutBuilder: Page = (root, ctx) => {
+  const requestedKey = (ctx.query.get("layout") || DEFAULT_LAYOUT).toLowerCase();
+  const fallbackLayout = registry.get(DEFAULT_LAYOUT) ?? Array.from(registry.values())[0];
+
+  if (!fallbackLayout) {
+    root.innerHTML = `
+      <section class="card">
+        <h1 class="h1">No Layouts Registered</h1>
+        <p>Add a layout file under <code>src/vis</code> to continue.</p>
+      </section>
     `;
-
-    const container = stepHost.querySelector<HTMLDivElement>("#choices")!;
-    drawChoices(container);
-
-    stepHost.querySelector<HTMLButtonElement>("#addChoiceBtn")!.onclick = () => {
-      if (state.options.length >= MAX_CHOICES) return;
-      const prev = deepClone(state);
-      const idx = state.options.length + 1;
-      state.options.push({ id: newOptId(), label: `Option ${idx}`, uiImportance: 3 });
-      reconcileScores(prev, state);
-      drawChoices(container);
-      renderPreview();
-    };
-
-    backBtn.style.display = "none";
-    nextBtn.textContent = "Next";
+    return;
   }
 
-  function drawChoices(container: HTMLElement) {
-    container.innerHTML = "";
-    state.options.forEach((opt, idx) => {
-      const row = document.createElement("div");
-      row.style.display = "grid";
-      row.style.gridTemplateColumns = "80px 1fr 220px 90px";
-      row.style.gap = "8px";
-      row.style.margin = "6px 0";
+  const resolved = registry.get(requestedKey) ?? fallbackLayout;
+  const resolvedKey = resolved.name.toLowerCase();
+  const matched = registry.has(requestedKey);
 
-      const idCell = document.createElement("div");
-      idCell.textContent = String(idx + 1);
+  const mount = document.createElement("div");
+  mount.className = "layout-host";
 
-      const input = document.createElement("input");
-      input.type = "text";
-      input.value = opt.label;
-      input.placeholder = `Option ${idx + 1}`;
-      input.oninput = () => {
-        opt.label = input.value.trim() || `Option ${idx + 1}`;
-        renderPreview();
-      };
+  root.replaceChildren();
 
-      const sliderWrap = document.createElement("div");
-      const slider = document.createElement("input");
-      slider.type = "range"; slider.min = "1"; slider.max = "5"; slider.step = "1";
-      slider.value = String(opt.uiImportance);
-      const label = document.createElement("span");
-      label.style.marginLeft = "8px";
-      const updateLab = () => label.textContent =
-        `Importance: ${slider.value} → weight ${mapImportanceToWeight(Number(slider.value)).toFixed(2)}`;
-      slider.oninput = () => { opt.uiImportance = Number(slider.value); updateLab(); renderPreview(); };
-      updateLab();
-      sliderWrap.append(slider, label);
-
-      const remove = document.createElement("button");
-      remove.textContent = "Remove";
-      remove.onclick = () => {
-        const prev = deepClone(state);
-        state.options.splice(idx, 1);
-        reconcileScores(prev, state);
-        drawChoices(container);
-        renderPreview();
-      };
-
-      row.append(idCell, input, sliderWrap, remove);
-      container.appendChild(row);
-    });
-  }
-
-  function renderStep2() {
-    stepHost.innerHTML = `
-      <h2 class="h1" style="font-size:1.2rem">Step 2 — Add factors & importance</h2>
-      <div id="factors"></div>
-      <div style="margin-top:8px">
-        <button id="addFactorBtn">Add factor</button>
-      </div>
-      <p style="color:var(--muted); margin-top:8px">
-        Importance (1–5): 1=Low, 3=Medium, 5=Very high. Mapped to weights [1,2].
-      </p>
+  if (!matched) {
+    const available = uniqueNames.map(name => `<code>${name}</code>`).join(", ");
+    const notice = document.createElement("section");
+    notice.className = "card";
+    notice.style.marginBottom = "12px";
+    notice.innerHTML = `
+      <h1 class="h1" style="font-size:1.1rem">Unknown Layout</h1>
+      <p>Request <code>${requestedKey}</code> not found. Showing <code>${resolvedKey}</code>.</p>
+      <p>Available layouts: ${available || "none"}.</p>
     `;
-
-    const container = stepHost.querySelector<HTMLDivElement>("#factors")!;
-    drawFactors(container);
-
-    stepHost.querySelector<HTMLButtonElement>("#addFactorBtn")!.onclick = () => {
-      const prev = deepClone(state);
-      const num = state.factors.length + 1;
-      state.factors.push({ id: newFacId(), label: `Factor ${num}`, uiImportance: 3 });
-      reconcileScores(prev, state);
-      drawFactors(container);
-      renderPreview();
-    };
-
-    backBtn.style.display = "";
-    nextBtn.textContent = "Next";
+    root.appendChild(notice);
   }
 
-  function drawFactors(container: HTMLElement) {
-    container.innerHTML = "";
-    state.factors.forEach((f, idx) => {
-      const row = document.createElement("div");
-      row.style.display = "grid";
-      row.style.gridTemplateColumns = "100px 1fr 220px 90px";
-      row.style.gap = "8px";
-      row.style.margin = "6px 0";
+  root.dataset.layout = resolvedKey;
+  root.appendChild(mount);
 
-      const idCell = document.createElement("div");
-      idCell.textContent = String(idx + 1);
-
-      const name = document.createElement("input");
-      name.type = "text";
-      name.value = f.label;
-      name.placeholder = `Factor ${idx + 1}`;
-      name.oninput = () => { f.label = name.value.trim() || `Factor ${idx + 1}`; renderPreview(); };
-
-      const sliderWrap = document.createElement("div");
-      const slider = document.createElement("input");
-      slider.type = "range"; slider.min = "1"; slider.max = "5"; slider.step = "1";
-      slider.value = String(f.uiImportance);
-      const label = document.createElement("span");
-      label.style.marginLeft = "8px";
-      const updateLab = () => label.textContent =
-        `Importance: ${slider.value} → weight ${mapImportanceToWeight(Number(slider.value)).toFixed(2)}`;
-      slider.oninput = () => { f.uiImportance = Number(slider.value); updateLab(); renderPreview(); };
-      updateLab();
-      sliderWrap.append(slider, label);
-
-      const remove = document.createElement("button");
-      remove.textContent = "Remove";
-      remove.onclick = () => {
-        const prev = deepClone(state);
-        state.factors.splice(idx, 1);
-        reconcileScores(prev, state);
-        drawFactors(container);
-        renderPreview();
-      };
-
-      row.append(idCell, name, sliderWrap, remove);
-      container.appendChild(row);
-    });
-  }
-
-  function renderStep3() {
-    stepHost.innerHTML = `
-      <h2 class="h1" style="font-size:1.2rem">Step 3 — Rate each option (1–5)</h2>
-      <p style="color:var(--muted); margin:4px 0 10px">
-        1=Very unfavorable · 3=Neutral · 5=Very favorable (mapped to -1..1)
-      </p>
-      <div style="overflow:auto">
-        <table style="border-collapse:collapse; min-width:700px">
-          <thead></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <p style="color:var(--muted); margin-top:8px">Click “Finish” to render the layout.</p>
-    `;
-
-    const thead = stepHost.querySelector("thead")!;
-    const tbody = stepHost.querySelector("tbody")!;
-    thead.innerHTML = "";
-
-    const hr = document.createElement("tr");
-    hr.appendChild(document.createElement("th"));
-    state.options.forEach(o => {
-      const th = document.createElement("th");
-      th.textContent = o.label;
-      th.style.textAlign = "center";
-      th.style.padding = "4px 8px";
-      hr.appendChild(th);
-    });
-    thead.appendChild(hr);
-
-    tbody.innerHTML = "";
-    state.factors.forEach(f => {
-      const tr = document.createElement("tr");
-      const th = document.createElement("th");
-      th.textContent = f.label;
-      th.style.textAlign = "left";
-      th.style.padding = "4px 8px";
-      tr.appendChild(th);
-
-      state.options.forEach(o => {
-        const td = document.createElement("td");
-        td.style.padding = "4px 8px";
-        const inp = document.createElement("input");
-        inp.type = "range"; inp.min = "1"; inp.max = "5"; inp.step = "1";
-        inp.value = String(state.scoresUI[f.id]?.[o.id] ?? 3);
-        const val = document.createElement("span");
-        val.style.marginLeft = "6px";
-        const setVal = () => val.textContent =
-          `${inp.value} → ${mapLikertToSigned(Number(inp.value)).toFixed(2)}`;
-        setVal();
-        inp.oninput = () => {
-          state.scoresUI[f.id] ||= {};
-          state.scoresUI[f.id][o.id] = Number(inp.value);
-          setVal();
-          renderPreview();
-        };
-        td.append(inp, val);
-        tr.appendChild(td);
-      });
-
-      tbody.appendChild(tr);
-    });
-
-    backBtn.style.display = "";
-    nextBtn.textContent = "Finish";
-  }
-
-  function renderCurrentStep() {
-    if (currentStep === 1) renderStep1();
-    else if (currentStep === 2) renderStep2();
-    else if (currentStep === 3) renderStep3();
-  }
-
-  function go(step: 1 | 2 | 3) {
-    currentStep = step;
-    renderCurrentStep();
-  }
-
-  backBtn.onclick = () => {
-    if (currentStep === 2) go(1);
-    else if (currentStep === 3) go(2);
-  };
-
-  nextBtn.onclick = () => {
-    if (currentStep === 1) {
-      if (state.options.length < 2) { alert("Please add at least 2 choices."); return; }
-      const prev = deepClone(state); reconcileScores(prev, state);
-      go(2);
-    } else if (currentStep === 2) {
-      if (state.factors.length < 1) { alert("Please add at least 1 factor."); return; }
-      const prev = deepClone(state); reconcileScores(prev, state);
-      go(3);
-    } else {
-      const data = toChartData(state);
-      chart.data(data).render();
-    }
-  };
-
-  function renderPreview() {
-    const data = toChartData(state, true);
-    chart.data(data).render();
-  }
-
-  function toChartData(s: UIState, neutralFallback = false) {
-    const options = s.options.map(o => ({
-      id: o.id,
-      label: o.label,
-      weight: mapImportanceToWeight(o.uiImportance),
-    }));
-
-    const factors = s.factors.map(f => ({
-      id: f.id,
-      label: f.label,
-      weight: mapImportanceToWeight(f.uiImportance),
-    }));
-
-    const scores: Record<string, Record<string, number>> = {};
-    for (const f of s.factors) {
-      scores[f.id] = {};
-      for (const o of s.options) {
-        const ui = s.scoresUI[f.id]?.[o.id];
-        scores[f.id][o.id] = ui ? mapLikertToSigned(ui) : (neutralFallback ? 0 : 0);
-      }
-    }
-
-    return { options, factors, scores };
-  }
-
-  go(1);
-  renderPreview();
+  return resolved.render(mount, ctx);
 };
 
 export default LayoutBuilder;

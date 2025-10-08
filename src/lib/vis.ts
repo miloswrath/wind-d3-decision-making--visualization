@@ -69,6 +69,18 @@ export class DecisionLayoutChart {
     this.gControls = this.svg.append("g").attr("class", "dl-controls");
   }
 
+  setSize(width: number, height: number) {
+    this.cfg.width = width;
+    this.cfg.height = height;
+    this.svg.attr("width", width).attr("height", height);
+    return this;
+  }
+
+  setShowWADD(show: boolean) {
+    this.cfg.showWADD = show;
+    return this;
+  }
+
   data(input: { factors: Factor[]; options: Option[]; scores: Scores }) {
     this.factors = input.factors;
     this.options = input.options;
@@ -85,17 +97,27 @@ export class DecisionLayoutChart {
 
   private calculateWADDScores(): Record<string, number> {
     const waddScores: Record<string, number> = {};
-    this.options.forEach(o => {
-      let score = 0;
-      let totalWeight = 0;
-      this.factors.forEach(f => {
-        const factorWeight = Math.max(0, f.weight);
-        totalWeight += factorWeight;
-        const optionScore = this.scores[f.id]?.[o.id] ?? 0;
-        score += factorWeight * optionScore;
+    this.options.forEach(option => {
+      let weightedTotal = 0;
+      let weightSum = 0;
+      const optionWeight = Math.max(0, option.weight);
+
+      this.factors.forEach(factor => {
+        const factorWeight = Math.max(0, factor.weight);
+        if (!factorWeight || !optionWeight) return;
+
+        const rawScore = this.scores[factor.id]?.[option.id] ?? 0;
+        const clamped = Math.max(-1, Math.min(1, rawScore));
+        const normalizedUtility = (clamped + 1) / 2; // map [-1,1] → [0,1]
+        const combinedWeight = factorWeight * optionWeight;
+
+        weightedTotal += combinedWeight * normalizedUtility;
+        weightSum += combinedWeight;
       });
-      const norm = totalWeight ? score / totalWeight : 0;
-      waddScores[o.id] = Number(norm.toFixed(2));
+
+      const normalized = weightSum ? weightedTotal / weightSum : 0;
+      const scaled = normalized * 10;
+      waddScores[option.id] = Number(scaled.toFixed(2));
     });
     return waddScores;
   }
@@ -106,15 +128,28 @@ export class DecisionLayoutChart {
     const COL_GAP = Math.max(2, padding.col);
     const MAX_ITEMS = 5;
 
+    const CONTROL_WIDTH = 44;
+    const CONTROL_HEIGHT = 36;
+    const CONTROL_GAP = 8;
+    const WADD_HEIGHT = showWADD ? 36 : 0;
+
+    const innerWidthAllowance = Math.max(80, initialWidth - margin.left - margin.right - CONTROL_WIDTH - CONTROL_GAP);
+    const innerHeightAllowance = Math.max(80, initialHeight - margin.top - margin.bottom - CONTROL_HEIGHT - CONTROL_GAP - WADD_HEIGHT);
+
     const MIN_ROW_PX = 28;
     const rowWeights = this.factors.map(f => Math.max(0, f.weight));
     const totalRowW = Math.max(1e-6, sum(rowWeights));
     const baseRowH = MIN_ROW_PX * this.factors.length;
-    const freeRowH = Math.max(0, initialHeight - margin.top - margin.bottom - baseRowH);
-    const rowCompress = baseRowH > (initialHeight - margin.top - margin.bottom) ? (initialHeight - margin.top - margin.bottom) / baseRowH : 1;
-    const rowHeights: number[] = this.factors.map((_, i) =>
+    const freeRowH = Math.max(0, innerHeightAllowance - baseRowH);
+    const rowCompress = baseRowH > innerHeightAllowance ? innerHeightAllowance / baseRowH : 1;
+    let rowHeights: number[] = this.factors.map((_, i) =>
       (MIN_ROW_PX + (freeRowH * (rowWeights[i] / totalRowW))) * rowCompress
     );
+    const totalRowHeight = rowHeights.reduce((acc, h) => acc + h, 0);
+    if (totalRowHeight > innerHeightAllowance) {
+      const scale = innerHeightAllowance / totalRowHeight;
+      rowHeights = rowHeights.map(h => h * scale);
+    }
     const rowTops: number[] = [margin.top];
     for (let i = 1; i < rowHeights.length; i++) {
       rowTops[i] = rowTops[i - 1] + rowHeights[i - 1];
@@ -124,27 +159,23 @@ export class DecisionLayoutChart {
     const colWeights = this.options.map(o => Math.max(0, o.weight));
     const totalColW = Math.max(1e-6, sum(colWeights));
     const baseColW = MIN_COL_PX * this.options.length;
-    const freeColW = Math.max(0, initialWidth - margin.left - margin.right - baseColW);
-    const colCompress = baseColW > (initialWidth - margin.left - margin.right) ? (initialWidth - margin.left - margin.right) / baseColW : 1;
-    const colBaseWidths: number[] = this.options.map((_, i) =>
+    const freeColW = Math.max(0, innerWidthAllowance - baseColW);
+    const colCompress = baseColW > innerWidthAllowance ? innerWidthAllowance / baseColW : 1;
+    let colBaseWidths: number[] = this.options.map((_, i) =>
       (MIN_COL_PX + (freeColW * (colWeights[i] / totalColW))) * colCompress
     );
-    const colWidths: number[] = colBaseWidths.map(w => w + COL_GAP);
+    let colWidths: number[] = colBaseWidths.map(w => w + COL_GAP);
+    const totalColWidth = colWidths.reduce((acc, w) => acc + w, 0);
+    if (totalColWidth > innerWidthAllowance) {
+      const colScale = innerWidthAllowance / totalColWidth;
+      colWidths = colWidths.map(w => w * colScale);
+    }
     const colLefts: number[] = [margin.left];
     for (let i = 1; i < colWidths.length; i++) {
       colLefts[i] = colLefts[i - 1] + colWidths[i - 1];
     }
 
-    // Calculate dynamic SVG dimensions
-    const lastColX = this.options.length
-      ? colLefts[colLefts.length - 1] + colWidths[colWidths.length - 1] + COL_GAP / 2 + 36
-      : margin.left + COL_GAP / 2 + 36;
-    const lastRowY = this.factors.length
-      ? rowTops[rowTops.length - 1] + rowHeights[rowHeights.length - 1] + ROW_GAP / 2 + 36
-      : margin.top + ROW_GAP / 2 + 36;
-    const newWidth = Math.max(initialWidth, lastColX + margin.right);
-    const newHeight = Math.max(initialHeight, lastRowY + margin.bottom + (showWADD ? 36 : 0));
-    this.svg.attr("width", newWidth).attr("height", newHeight);
+    this.svg.attr("width", initialWidth).attr("height", initialHeight);
 
     const HEADER_H = 36;
     const col = this.gCols
@@ -597,7 +628,7 @@ export class DecisionLayoutChart {
             this.gWADD
               .selectAll<SVGGElement, Option>("g.wadd")
               .select("text")
-              .text(d => `WADD: ${waddScores[d.id].toFixed(2)}`);
+              .text(d => `WADD: ${waddScores[d.id].toFixed(1)}/10`);
           }
         })
         .on("end", () => {
@@ -611,9 +642,9 @@ export class DecisionLayoutChart {
 
     cells.exit().remove();
 
-    const innerH = rowTops.length
-      ? rowTops[rowTops.length - 1] + rowHeights[rowHeights.length - 1] - margin.top
-      : 0;
+    const innerH = rowHeights.reduce((acc, h) => acc + h, 0);
+    const contentBottom = margin.top + innerH;
+    const waddY = contentBottom + (innerH > 0 ? CONTROL_GAP : 0);
 
     if (showWADD) {
       const waddScores = this.calculateWADDScores();
@@ -633,7 +664,7 @@ export class DecisionLayoutChart {
         .style("fill", colors.headerFg);
 
       const waddAll = waddEnter.merge(wadd);
-      waddAll.transition(t).attr("transform", (_, i) => `translate(${colLefts[i]}, ${margin.top + innerH})`);
+      waddAll.transition(t).attr("transform", (_, i) => `translate(${colLefts[i]}, ${waddY})`);
       waddAll.select("rect.wadd-bg")
         .transition(t)
         .attr("x", COL_GAP / 2)
@@ -645,7 +676,7 @@ export class DecisionLayoutChart {
         .transition(t)
         .attr("x", (_, i) => colWidths[i] / 2)
         .attr("y", 20)
-        .text(d => `WADD: ${waddScores[d.id].toFixed(2)}`);
+        .text(d => `WADD: ${waddScores[d.id].toFixed(1)}/10`);
 
       wadd.exit().remove();
     } else {
@@ -671,20 +702,17 @@ export class DecisionLayoutChart {
 
     const controlsAll = controlsEnter.merge(controls);
     controlsAll.attr("transform", () => {
-      const lastColIdx = this.options.length ? this.options.length - 1 : 0;
-      const x = this.options.length
-        ? colLefts[lastColIdx] + colWidths[lastColIdx] + COL_GAP / 2
-        : margin.left + COL_GAP / 2;
+      const x = initialWidth - margin.right - CONTROL_WIDTH;
       return `translate(${x}, ${margin.top - HEADER_H})`;
     });
     controlsAll.select("rect")
       .attr("x", 0)
-      .attr("y", -2)
-      .attr("width", 36)
-      .attr("height", HEADER_H);
+      .attr("y", 0)
+      .attr("width", CONTROL_WIDTH)
+      .attr("height", CONTROL_HEIGHT);
     controlsAll.select("text")
-      .attr("x", 18)
-      .attr("y", HEADER_H / 2);
+      .attr("x", CONTROL_WIDTH / 2)
+      .attr("y", CONTROL_HEIGHT / 2);
     controlsAll.on("click", () => {
       if (this.options.length >= MAX_ITEMS) return;
       const newId = `o${Date.now()}`;
@@ -717,21 +745,17 @@ export class DecisionLayoutChart {
       .text("+");
 
     const factorControlsAll = factorControlsEnter.merge(factorControls);
-    factorControlsAll.attr("transform", () => {
-      const lastRowIdx = this.factors.length ? this.factors.length - 1 : 0;
-      const y = this.factors.length
-        ? rowTops[lastRowIdx] + rowHeights[lastRowIdx] + ROW_GAP / 2
-        : margin.top + ROW_GAP / 2;
-      return `translate(0, ${y})`;
-    });
+    const factorControlY = waddY + (showWADD ? WADD_HEIGHT + CONTROL_GAP : CONTROL_GAP);
+    const clampedFactorY = Math.min(factorControlY, initialHeight - margin.bottom - CONTROL_HEIGHT);
+    factorControlsAll.attr("transform", () => `translate(0, ${clampedFactorY})`);
     factorControlsAll.select("rect")
       .attr("x", 0)
-      .attr("width", margin.left - 5)
+      .attr("width", Math.max(60, margin.left - 5))
       .attr("y", 0)
-      .attr("height", 36);
+      .attr("height", CONTROL_HEIGHT);
     factorControlsAll.select("text")
-      .attr("x", margin.left / 2)
-      .attr("y", 18);
+      .attr("x", Math.max(60, margin.left - 5) / 2)
+      .attr("y", CONTROL_HEIGHT / 2);
     factorControlsAll.on("click", () => {
       if (this.factors.length >= MAX_ITEMS) return;
       const newId = `f${Date.now()}`;
