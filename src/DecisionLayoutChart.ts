@@ -144,7 +144,6 @@ export class DecisionLayoutChart {
 
     colEnter.append("rect").attr("class", "header-bg").attr("rx", 6).attr("ry", 6);
     colEnter.append("foreignObject").attr("class", "header-label");
-    colEnter.append("rect").attr("class", "resize-handle").style("cursor", "col-resize").attr("fill", "transparent");
     colEnter.append("rect").attr("class", "remove-btn").style("cursor", "pointer").attr("fill", "#ff4d4d");
 
     const colAll = colEnter.merge(col);
@@ -189,12 +188,6 @@ export class DecisionLayoutChart {
       }
     }.bind(this));
 
-    colAll.select("rect.resize-handle")
-      .attr("x", (_, i) => colWidths[i] - 8)
-      .attr("y", -2)
-      .attr("width", 16)
-      .attr("height", HEADER_H);
-
     colAll.select("rect.remove-btn")
       .attr("x", (_, i) => colWidths[i] - 24)
       .attr("y", -HEADER_H / 2 - 6)
@@ -222,39 +215,6 @@ export class DecisionLayoutChart {
       this.editingId = d.id;
       this.render();
     });
-
-    colAll.select<SVGRectElement>("rect.resize-handle").call(
-      drag<Option>()
-        .on("start", (event, d) => {
-          const idx = this.options.findIndex(o => o.id === d.id);
-          this.dragInfo = {
-            type: "col-resize",
-            startX: event.x,
-            startWidth: colWidths[idx],
-            startWeight: d.weight,
-            idx,
-            updating: false,
-          };
-        })
-        .on("drag", (event, d) => {
-          const delta = event.x - this.dragInfo.startX;
-          let newWidth = Math.max(50, this.dragInfo.startWidth + delta);
-          let newWeight = this.dragInfo.startWeight * (newWidth / this.dragInfo.startWidth);
-          newWeight = Math.max(1, Math.min(2, newWeight));
-          this.options[this.dragInfo.idx].weight = newWeight;
-          if (!this.updatePending) {
-            this.updatePending = true;
-            requestAnimationFrame(() => {
-              this.render();
-              if (this.onUpdate) this.onUpdate({ options: [...this.options] });
-              this.updatePending = false;
-            });
-          }
-        })
-        .on("end", () => {
-          if (this.onUpdate) this.onUpdate({ options: [...this.options] });
-        })
-    );
 
     colAll.select<SVGRectElement>("rect.header-bg").style("cursor", "move").call(
       drag<Option>()

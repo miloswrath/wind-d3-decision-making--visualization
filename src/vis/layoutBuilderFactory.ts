@@ -1,5 +1,7 @@
 import type { Page } from "../router";
 import { DecisionLayoutChart } from "../lib/vis";
+import { computeWaddScores } from "../lib/wadd";
+import { attachDecisionWorkflow } from "../lib/decisionWorkflow";
 
 type PreviewKind = "chart" | "table";
 
@@ -9,7 +11,7 @@ type BuilderConfig = {
 };
 
 type UIState = {
-  options: { id: string; label: string; uiImportance: number }[];
+  options: { id: string; label: string }[];
   factors: { id: string; label: string; uiImportance: number }[];
   scoresUI: Record<string, Record<string, number>>;
 };
@@ -22,8 +24,15 @@ const weightToImportance = (w: number) => Math.round(1 + (w - 1) * 4);
 const signedToLikert = (s: number) => Math.round(3 + s * 2);
 
 export function createBuilderLayout(config: BuilderConfig): Page {
-  return (root) => {
-    const showWADDControl = config.kind === "chart"
+  return (root, ctx) => {
+    const supportsWADD = config.kind === "chart" || config.kind === "table";
+    const waddSetting = ctx.query.get("wadd")?.toLowerCase();
+    const waddMode = waddSetting === "on"
+      ? "always"
+      : waddSetting === "off"
+        ? "never"
+        : "checkbox";
+    const showWADDControl = supportsWADD && waddMode === "checkbox"
       ? `
         <div style="margin-bottom:12px">
           <label style="display:flex; align-items:center; gap:8px; color:var(--fg)">
@@ -37,7 +46,7 @@ export function createBuilderLayout(config: BuilderConfig): Page {
       <section class="card">
         <h1 class="h1">Build your decision layout</h1>
         <ol style="margin:0 0 12px 1.1rem; color:var(--muted)">
-          <li>Add up to 5 choices & set importance</li>
+          <li>Add up to 5 choices</li>
           <li>Add factors and set importance (1–5)</li>
           <li>Rate each choice per factor (1–5)</li>
         </ol>
@@ -59,12 +68,12 @@ export function createBuilderLayout(config: BuilderConfig): Page {
     const nextBtn = root.querySelector<HTMLButtonElement>("#nextBtn")!;
     const vizEl = root.querySelector<HTMLDivElement>("#viz")!;
     vizEl.style.overflow = config.kind === "chart" ? "hidden" : "auto";
-    const showWADDCheckbox = config.kind === "chart"
+    const showWADDCheckbox = supportsWADD && waddMode === "checkbox"
       ? root.querySelector<HTMLInputElement>("#showWADD")
       : null;
     const previewCard = root.querySelector<HTMLElement>("#previewCard")!;
 
-    let showWADD = false;
+    let showWADD = waddMode === "always";
     let finished = config.previewMode === "after-finish" ? false : true;
 
     const BASE_HEIGHT = 600;
@@ -83,6 +92,9 @@ export function createBuilderLayout(config: BuilderConfig): Page {
         width: measureWidth(),
         height: BASE_HEIGHT,
         showWADD,
+        onScoreEdit: (fid, oid) => {
+          touchedCells.add(cellKey(fid, oid));
+        },
         onUpdate: (updates) => {
           if (updates.factors) {
             const idToFactor = new Map(state.factors.map(f => [f.id, f]));
@@ -104,6 +116,7 @@ export function createBuilderLayout(config: BuilderConfig): Page {
               label: newF.label,
               uiImportance: weightToImportance(newF.weight),
             });
+            pruneTouched();
           }
           if (updates.options) {
             const idToOption = new Map(state.options.map(o => [o.id, o]));
@@ -111,26 +124,25 @@ export function createBuilderLayout(config: BuilderConfig): Page {
               const existing = idToOption.get(newO.id);
               if (existing) {
                 existing.label = newO.label;
-                existing.uiImportance = weightToImportance(newO.weight);
               } else {
                 state.options.push({
                   id: newO.id,
                   label: newO.label,
-                  uiImportance: weightToImportance(newO.weight),
                 });
               }
             });
             state.options = updates.options.map(newO => idToOption.get(newO.id) || {
               id: newO.id,
               label: newO.label,
-              uiImportance: weightToImportance(newO.weight),
             });
+            pruneTouched();
           }
           if (updates.scores) {
             for (const fid in updates.scores) {
               state.scoresUI[fid] ??= {};
               for (const oid in updates.scores[fid]) {
                 state.scoresUI[fid][oid] = signedToLikert(updates.scores[fid][oid]);
+                touchedCells.add(cellKey(fid, oid));
               }
             }
           }
@@ -138,12 +150,6 @@ export function createBuilderLayout(config: BuilderConfig): Page {
           renderCurrentStep();
           renderPreview();
         },
-      });
-
-      showWADDCheckbox?.addEventListener("change", () => {
-        showWADD = !!showWADDCheckbox.checked;
-        chart?.setShowWADD(showWADD);
-        renderPreview(true);
       });
 
       if (typeof ResizeObserver !== "undefined") {
@@ -161,20 +167,38 @@ export function createBuilderLayout(config: BuilderConfig): Page {
       previewCard.style.display = "none";
     }
 
+    if (supportsWADD && showWADDCheckbox) {
+      showWADDCheckbox.addEventListener("change", () => {
+        showWADD = !!showWADDCheckbox.checked;
+        if (chart) chart.setShowWADD(showWADD);
+        renderPreview(true);
+      });
+    }
+
     let optSeq = 0, facSeq = 0;
     const newOptId = () => `o${++optSeq}`;
     const newFacId = () => `f${++facSeq}`;
 
     const state: UIState = {
       options: [
-        { id: newOptId(), label: "Option A", uiImportance: 3 },
-        { id: newOptId(), label: "Option B", uiImportance: 3 },
+        { id: newOptId(), label: "Option A" },
+        { id: newOptId(), label: "Option B" },
       ],
       factors: [
         { id: newFacId(), label: "Factor 1", uiImportance: 3 },
         { id: newFacId(), label: "Factor 2", uiImportance: 3 },
       ],
       scoresUI: {},
+    };
+
+    const touchedCells = new Set<string>();
+    const cellKey = (fid: string, oid: string) => `${fid}__${oid}`;
+    const pruneTouched = () => {
+      const valid = new Set<string>();
+      state.factors.forEach(f => state.options.forEach(o => valid.add(cellKey(f.id, o.id))));
+      for (const key of Array.from(touchedCells)) {
+        if (!valid.has(key)) touchedCells.delete(key);
+      }
     };
 
     const deepClone = <T,>(x: T): T => JSON.parse(JSON.stringify(x));
@@ -190,6 +214,7 @@ export function createBuilderLayout(config: BuilderConfig): Page {
         }
       }
       next.scoresUI = newScores;
+      pruneTouched();
     }
 
     let currentStep = 1 as 1 | 2 | 3;
@@ -201,7 +226,7 @@ export function createBuilderLayout(config: BuilderConfig): Page {
         <div style="margin-top:8px">
           <button id="addChoiceBtn">Add choice</button>
         </div>
-        <p style="color:var(--muted); margin-top:8px">You can rename choices and set importance anytime.</p>
+        <p style="color:var(--muted); margin-top:8px">You can rename choices anytime.</p>
       `;
 
       const container = stepHost.querySelector<HTMLDivElement>("#choices")!;
@@ -211,7 +236,7 @@ export function createBuilderLayout(config: BuilderConfig): Page {
         if (state.options.length >= MAX_CHOICES) return;
         const prev = deepClone(state);
         const idx = state.options.length + 1;
-        state.options.push({ id: newOptId(), label: `Option ${idx}`, uiImportance: 3 });
+        state.options.push({ id: newOptId(), label: `Option ${idx}` });
         reconcileScores(prev, state);
         drawChoices(container);
         renderPreview();
@@ -226,7 +251,7 @@ export function createBuilderLayout(config: BuilderConfig): Page {
       state.options.forEach((opt, idx) => {
         const row = document.createElement("div");
         row.style.display = "grid";
-        row.style.gridTemplateColumns = "80px 1fr 220px 90px";
+        row.style.gridTemplateColumns = "80px 1fr 90px";
         row.style.gap = "8px";
         row.style.margin = "6px 0";
 
@@ -242,18 +267,6 @@ export function createBuilderLayout(config: BuilderConfig): Page {
           renderPreview();
         };
 
-        const sliderWrap = document.createElement("div");
-        const slider = document.createElement("input");
-        slider.type = "range"; slider.min = "1"; slider.max = "5"; slider.step = "1";
-        slider.value = String(opt.uiImportance);
-        const label = document.createElement("span");
-        label.style.marginLeft = "8px";
-        const updateLab = () => label.textContent =
-          `Importance: ${slider.value} → weight ${mapImportanceToWeight(Number(slider.value)).toFixed(2)}`;
-        slider.oninput = () => { opt.uiImportance = Number(slider.value); updateLab(); renderPreview(); };
-        updateLab();
-        sliderWrap.append(slider, label);
-
         const remove = document.createElement("button");
         remove.textContent = "Remove";
         remove.onclick = () => {
@@ -264,7 +277,7 @@ export function createBuilderLayout(config: BuilderConfig): Page {
           renderPreview();
         };
 
-        row.append(idCell, input, sliderWrap, remove);
+        row.append(idCell, input, remove);
         container.appendChild(row);
       });
     }
@@ -382,6 +395,7 @@ export function createBuilderLayout(config: BuilderConfig): Page {
           inp.oninput = () => {
             state.scoresUI[f.id] ||= {};
             state.scoresUI[f.id][o.id] = Number(inp.value);
+            touchedCells.add(cellKey(f.id, o.id));
             setVal();
             renderPreview();
           };
@@ -438,9 +452,10 @@ export function createBuilderLayout(config: BuilderConfig): Page {
       const data = toChartData(state, neutralFallback);
       if (config.kind === "chart") {
         ensureChartSize();
-        chart?.data(data).render();
+        chart?.setShowWADD(showWADD);
+        chart?.data({ ...data, modified: touchedCells }).render();
       } else {
-        renderTable(data);
+        renderTable(data, showWADD);
       }
     }
 
@@ -448,7 +463,7 @@ export function createBuilderLayout(config: BuilderConfig): Page {
       const options = s.options.map(o => ({
         id: o.id,
         label: o.label,
-        weight: mapImportanceToWeight(o.uiImportance),
+        weight: 1,
       }));
 
       const factors = s.factors.map(f => ({
@@ -469,7 +484,7 @@ export function createBuilderLayout(config: BuilderConfig): Page {
       return { options, factors, scores };
     }
 
-    function renderTable(data: ReturnType<typeof toChartData>) {
+    function renderTable(data: ReturnType<typeof toChartData>, includeWADD: boolean) {
       vizEl.replaceChildren();
 
       const table = document.createElement("table");
@@ -484,28 +499,13 @@ export function createBuilderLayout(config: BuilderConfig): Page {
         const th = document.createElement("th");
         th.scope = idx === 0 ? "col" : "col";
         th.textContent = label;
+        if (label === "Importance") th.classList.add("table-importance");
         headRow.appendChild(th);
       });
       thead.appendChild(headRow);
       table.appendChild(thead);
 
       const tbody = document.createElement("tbody");
-
-      const optionRow = document.createElement("tr");
-      const optionLabel = document.createElement("th");
-      optionLabel.scope = "row";
-      optionLabel.textContent = "Option importance";
-      optionRow.appendChild(optionLabel);
-      const spacer = document.createElement("td");
-      spacer.textContent = "";
-      optionRow.appendChild(spacer);
-      data.options.forEach((o) => {
-        const td = document.createElement("td");
-        td.style.textAlign = "center";
-        td.textContent = String(weightToImportance(o.weight));
-        optionRow.appendChild(td);
-      });
-      tbody.appendChild(optionRow);
 
       data.factors.forEach((factor) => {
         const row = document.createElement("tr");
@@ -515,7 +515,8 @@ export function createBuilderLayout(config: BuilderConfig): Page {
         row.appendChild(labelCell);
 
         const importanceCell = document.createElement("td");
-        importanceCell.style.textAlign = "center";
+        importanceCell.classList.add("table-importance");
+        importanceCell.style.textAlign = "right";
         importanceCell.textContent = String(weightToImportance(factor.weight));
         row.appendChild(importanceCell);
 
@@ -531,48 +532,46 @@ export function createBuilderLayout(config: BuilderConfig): Page {
         tbody.appendChild(row);
       });
 
-      const waddScores = calculateTableWADD(data);
-      const waddRow = document.createElement("tr");
-      const waddLabel = document.createElement("th");
-      waddLabel.scope = "row";
-      waddLabel.textContent = "WADD";
-      waddRow.appendChild(waddLabel);
-      const filler = document.createElement("td");
-      filler.textContent = "";
-      waddRow.appendChild(filler);
-      data.options.forEach(option => {
-        const td = document.createElement("td");
-        td.style.textAlign = "center";
-        td.textContent = waddScores[option.id].toFixed(1);
-        waddRow.appendChild(td);
-      });
-      tbody.appendChild(waddRow);
+      if (includeWADD) {
+        const waddScores = computeWaddScores(data.options, data.factors, data.scores);
+        const waddRow = document.createElement("tr");
+        waddRow.classList.add("table-wadd");
+        const waddLabel = document.createElement("th");
+        waddLabel.scope = "row";
+        waddLabel.textContent = "WADD";
+        waddRow.appendChild(waddLabel);
+        const filler = document.createElement("td");
+        filler.classList.add("table-importance");
+        filler.textContent = "";
+        waddRow.appendChild(filler);
+        data.options.forEach(option => {
+          const td = document.createElement("td");
+          td.style.textAlign = "center";
+          td.textContent = waddScores[option.id].toFixed(1);
+          waddRow.appendChild(td);
+        });
+        tbody.appendChild(waddRow);
+      }
 
       table.appendChild(tbody);
       vizEl.appendChild(table);
     }
 
-    function calculateTableWADD(data: ReturnType<typeof toChartData>) {
-      const result: Record<string, number> = {};
-      data.options.forEach(option => {
-        let weightedTotal = 0;
-        let weightSum = 0;
-        const optionWeight = Math.max(0, option.weight);
-        data.factors.forEach(factor => {
-          const factorWeight = Math.max(0, factor.weight);
-          if (!factorWeight || !optionWeight) return;
-          const rawScore = data.scores[factor.id]?.[option.id] ?? 0;
-          const clamped = Math.max(-1, Math.min(1, rawScore));
-          const normalizedUtility = (clamped + 1) / 2;
-          const combinedWeight = factorWeight * optionWeight;
-          weightedTotal += combinedWeight * normalizedUtility;
-          weightSum += combinedWeight;
-        });
-        const normalized = weightSum ? weightedTotal / weightSum : 0;
-        result[option.id] = normalized * 10;
-      });
-      return result;
-    }
+    const decisionHost = document.createElement("div");
+    root.appendChild(decisionHost);
+    attachDecisionWorkflow({
+      host: decisionHost,
+      getDecisionData: () => {
+        const data = toChartData(state, false);
+        const waddScores = computeWaddScores(data.options, data.factors, data.scores);
+        return {
+          options: data.options.map(o => ({ id: o.id, label: state.options.find(so => so.id === o.id)?.label || o.label })),
+          waddScores,
+        };
+      },
+      showWaddOnButtons: waddMode === "always",
+      onRestart: () => location.reload(),
+    });
 
     go(1);
     if (config.previewMode === "live") {

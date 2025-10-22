@@ -17,6 +17,9 @@ export type LayoutConfig = {
   fontFamily?: string;
   onUpdate?: (updates: Partial<{ factors: Factor[]; options: Option[]; scores: Scores }>) => void;
   showWADD?: boolean;
+  neutralCellColors?: { pos: string; neg: string };
+  markCellsOnClick?: boolean;
+  onScoreEdit?: (factorId: string, optionId: string) => void;
 };
 
 const DEFAULTS: Required<Omit<LayoutConfig, "width" | "height">> = {
@@ -31,6 +34,19 @@ const DEFAULTS: Required<Omit<LayoutConfig, "width" | "height">> = {
   },
   fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
   showWADD: false,
+  neutralCellColors: {
+    pos: "#8a93a9",
+    neg: "#3d4254",
+  },
+  markCellsOnClick: false,
+  onScoreEdit: undefined,
+};
+
+type ChartDataInput = {
+  factors: Factor[];
+  options: Option[];
+  scores: Scores;
+  modified?: Iterable<string>;
 };
 
 export class DecisionLayoutChart {
@@ -46,17 +62,23 @@ export class DecisionLayoutChart {
   private options: Option[] = [];
   private scores: Scores = {};
   private onUpdate?: (updates: Partial<{ factors: Factor[]; options: Option[]; scores: Scores }>) => void;
+  private onScoreEdit?: (factorId: string, optionId: string) => void;
   private dragInfo: any = {};
   private updatePending = false;
   private editingId: string | null = null;
+  private modifiedCells = new Set<string>();
 
   constructor(container: HTMLElement, cfg: LayoutConfig) {
     this.cfg = { ...cfg, ...DEFAULTS, margin: { ...DEFAULTS.margin, ...(cfg.margin || {}) },
                  padding: { ...DEFAULTS.padding, ...(cfg.padding || {}) },
                  colors: { ...DEFAULTS.colors, ...(cfg.colors || {}) },
                  fontFamily: cfg.fontFamily || DEFAULTS.fontFamily,
-                 showWADD: cfg.showWADD ?? DEFAULTS.showWADD };
+                 showWADD: cfg.showWADD ?? DEFAULTS.showWADD,
+                 neutralCellColors: { ...DEFAULTS.neutralCellColors, ...(cfg.neutralCellColors || {}) },
+                 markCellsOnClick: cfg.markCellsOnClick ?? DEFAULTS.markCellsOnClick,
+                 onScoreEdit: cfg.onScoreEdit };
     this.onUpdate = cfg.onUpdate;
+    this.onScoreEdit = cfg.onScoreEdit;
 
     this.svg = select(container)
       .append("svg")
@@ -81,10 +103,11 @@ export class DecisionLayoutChart {
     return this;
   }
 
-  data(input: { factors: Factor[]; options: Option[]; scores: Scores }) {
+  data(input: ChartDataInput) {
     this.factors = input.factors;
     this.options = input.options;
     this.scores = input.scores;
+    this.syncModifiedCells(input.modified);
     return this;
   }
 
@@ -92,6 +115,9 @@ export class DecisionLayoutChart {
     const s = Math.max(-1, Math.min(1, score));
     if (!this.scores[factorId]) this.scores[factorId] = {} as any;
     this.scores[factorId][optionId] = s;
+    const key = this.cellKey(factorId, optionId);
+    this.modifiedCells.add(key);
+    if (this.onScoreEdit) this.onScoreEdit(factorId, optionId);
     return this;
   }
 
@@ -122,8 +148,28 @@ export class DecisionLayoutChart {
     return waddScores;
   }
 
+  private cellKey(fid: string, oid: string) {
+    return `${fid}__${oid}`;
+  }
+
+  private syncModifiedCells(modified?: Iterable<string>) {
+    const valid = new Set<string>();
+    this.factors.forEach(f => {
+      this.options.forEach(o => valid.add(this.cellKey(f.id, o.id)));
+    });
+    if (modified) {
+      const next = new Set<string>();
+      for (const key of modified) {
+        if (valid.has(key)) next.add(key);
+      }
+      this.modifiedCells = next;
+    } else {
+      this.modifiedCells = new Set(Array.from(this.modifiedCells).filter(key => valid.has(key)));
+    }
+  }
+
   render() {
-    const { width: initialWidth, height: initialHeight, margin, colors, padding, onUpdate, showWADD } = this.cfg;
+    const { width: initialWidth, height: initialHeight, margin, colors, padding, onUpdate, showWADD, neutralCellColors, markCellsOnClick } = this.cfg;
     const ROW_GAP = Math.max(2, padding.row);
     const COL_GAP = Math.max(2, padding.col);
     const MAX_ITEMS = 5;
@@ -194,7 +240,6 @@ export class DecisionLayoutChart {
       .style("font-weight", 700)
       .style("fill", colors.headerFg);
     colEnter.append("foreignObject").attr("class", "header-input");
-    colEnter.append("rect").attr("class", "resize-handle").style("cursor", "col-resize").attr("fill", "transparent");
     colEnter.append("text").attr("class", "remove-btn")
       .style("cursor", "pointer")
       .style("fill", colors.headerFg)
@@ -252,12 +297,6 @@ export class DecisionLayoutChart {
           if (this.onUpdate) this.onUpdate({ options: [...this.options] });
         }
       });
-    colAll.select("rect.resize-handle")
-      .transition(t)
-      .attr("x", (_, i) => colWidths[i] - COL_GAP / 2 - 8)
-      .attr("y", -2)
-      .attr("width", 16)
-      .attr("height", HEADER_H);
     colAll.select("text.remove-btn")
       .attr("x", (_, i) => colWidths[i] - COL_GAP / 2 - 20)
       .attr("y", HEADER_H / 2)
@@ -279,39 +318,6 @@ export class DecisionLayoutChart {
         this.render();
         if (this.onUpdate) this.onUpdate({ options: [...this.options], scores: { ...this.scores } });
       });
-
-    colAll.select<SVGRectElement>("rect.resize-handle").call(
-      drag<Option>()
-        .on("start", (event, d) => {
-          const idx = this.options.findIndex(o => o.id === d.id);
-          this.dragInfo = {
-            type: "col-resize",
-            startX: event.x,
-            startWidth: colWidths[idx],
-            startWeight: d.weight,
-            idx,
-            updating: false,
-          };
-        })
-        .on("drag", (event, d) => {
-          const delta = event.x - this.dragInfo.startX;
-          let newWidth = Math.max(50, this.dragInfo.startWidth + delta);
-          let newWeight = this.dragInfo.startWeight * (newWidth / this.dragInfo.startWidth);
-          newWeight = Math.max(1, Math.min(2, newWeight));
-          this.options[this.dragInfo.idx].weight = newWeight;
-          if (!this.updatePending) {
-            this.updatePending = true;
-            requestAnimationFrame(() => {
-              this.render();
-              if (this.onUpdate) this.onUpdate({ options: [...this.options] });
-              this.updatePending = false;
-            });
-          }
-        })
-        .on("end", () => {
-          if (this.onUpdate) this.onUpdate({ options: [...this.options] });
-        })
-    );
 
     colAll.select<SVGRectElement>("rect.header-bg").style("cursor", "move").call(
       drag<Option>()
@@ -543,17 +549,19 @@ export class DecisionLayoutChart {
         score: (this.scores[f.id]?.[o.id] ?? 0)
       }))
     );
+    this.syncModifiedCells();
 
     const cells = this.gGrid.selectAll<SVGGElement, any>("g.cell")
       .data(cellData, (d: any) => `${d.fid}__${d.oid}`);
 
     const cellsEnter = cells.enter().append("g").attr("class", "cell");
     cellsEnter.append("rect").attr("class", "cell-bg").attr("fill", colors.grid).attr("rx", 6).attr("ry", 6);
-    cellsEnter.append("rect").attr("class", "cell-pos").attr("fill", colors.pos);
-    cellsEnter.append("rect").attr("class", "cell-neg").attr("fill", colors.neg);
+    cellsEnter.append("rect").attr("class", "cell-pos").attr("fill", neutralCellColors.pos);
+    cellsEnter.append("rect").attr("class", "cell-neg").attr("fill", neutralCellColors.neg);
     cellsEnter.append("rect").attr("class", "score-handle").style("cursor", "col-resize").attr("fill", "transparent");
 
     const all = cellsEnter.merge(cells);
+    const chartInstance = this;
     all.transition(t).attr("transform", d => `translate(${colLefts[d.cidx]}, ${rowTops[d.ridx]})`);
 
     all.select("rect.cell-bg")
@@ -563,8 +571,8 @@ export class DecisionLayoutChart {
       .attr("width", d => colWidths[d.cidx] - COL_GAP)
       .attr("height", d => rowHeights[d.ridx] - ROW_GAP);
 
-    all.each(function (d) {
-      const g = select(this);
+    all.each((d, i, nodes) => {
+      const g = select(nodes[i] as SVGGElement);
       const h = rowHeights[d.ridx] - ROW_GAP;
       const y = ROW_GAP / 2;
       const w = colWidths[d.cidx] - COL_GAP;
@@ -572,20 +580,26 @@ export class DecisionLayoutChart {
       const fracPos = (d.score + 1) / 2;
       const wPos = w * fracPos;
       const wNeg = w - wPos;
+      const key = chartInstance.cellKey(d.fid, d.oid);
+      const isModified = chartInstance.modifiedCells.has(key);
+      const posFill = isModified ? colors.pos : neutralCellColors.pos;
+      const negFill = isModified ? colors.neg : neutralCellColors.neg;
 
       g.select<SVGRectElement>("rect.cell-pos")
         .transition(t)
         .attr("x", x0 + 1)
         .attr("y", y + 1)
         .attr("width", Math.max(0, wPos - 1))
-        .attr("height", Math.max(0, h - 2));
+        .attr("height", Math.max(0, h - 2))
+        .attr("fill", posFill);
 
       g.select<SVGRectElement>("rect.cell-neg")
         .transition(t)
         .attr("x", x0 + wPos + 1)
         .attr("y", y + 1)
         .attr("width", Math.max(0, wNeg - 2))
-        .attr("height", Math.max(0, h - 2));
+        .attr("height", Math.max(0, h - 2))
+        .attr("fill", negFill);
 
       g.select<SVGRectElement>("rect.score-handle")
         .transition(t)
@@ -623,6 +637,8 @@ export class DecisionLayoutChart {
 
           const newScore = 2 * (newWPos / this.dragInfo.w) - 1;
           this.updateScore(this.dragInfo.d.fid, this.dragInfo.d.oid, newScore);
+          this.dragInfo.g.select<SVGRectElement>("rect.cell-pos").attr("fill", colors.pos);
+          this.dragInfo.g.select<SVGRectElement>("rect.cell-neg").attr("fill", colors.neg);
           if (showWADD) {
             const waddScores = this.calculateWADDScores();
             this.gWADD
@@ -639,6 +655,23 @@ export class DecisionLayoutChart {
           this.render();
         })
     );
+
+    if (markCellsOnClick) {
+      all.on("mousedown.cellmark", (event, d) => {
+        const key = chartInstance.cellKey(d.fid, d.oid);
+        if (!chartInstance.modifiedCells.has(key)) {
+          chartInstance.modifiedCells.add(key);
+          if (chartInstance.onScoreEdit) {
+            chartInstance.onScoreEdit(d.fid, d.oid);
+          }
+          const g = select(event.currentTarget as SVGGElement);
+          g.select<SVGRectElement>("rect.cell-pos").attr("fill", colors.pos);
+          g.select<SVGRectElement>("rect.cell-neg").attr("fill", colors.neg);
+        }
+      });
+    } else {
+      all.on("mousedown.cellmark", null);
+    }
 
     cells.exit().remove();
 
