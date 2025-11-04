@@ -2,6 +2,7 @@ import type { Page } from "../router";
 import { DecisionLayoutChart } from "../lib/vis";
 import { computeWaddScores } from "../lib/wadd";
 import { attachDecisionWorkflow } from "../lib/decisionWorkflow";
+import { isEmbedded, postStorageToParent } from "../lib/embedMessaging";
 
 type PreviewKind = "chart" | "table";
 
@@ -16,12 +17,68 @@ type UIState = {
   scoresUI: Record<string, Record<string, number>>;
 };
 
+type ChartDataSnapshot = {
+  options: { id: string; label: string; weight: number }[];
+  factors: { id: string; label: string; weight: number }[];
+  scores: Record<string, Record<string, number>>;
+};
+
+type PersistedBuilderState = {
+  chart: ChartDataSnapshot;
+  table: {
+    options: { id: string; label: string; weight: number }[];
+    factors: { id: string; label: string; weight: number; importance: number }[];
+    scores: Record<string, Record<string, number>>;
+    waddScores: Record<string, number>;
+  };
+  decision: {
+    options: { id: string; label: string }[];
+    waddScores: Record<string, number>;
+  };
+  meta: {
+    kind: PreviewKind;
+    previewMode: "live" | "after-finish";
+    showWadd: boolean;
+    finished: boolean;
+  };
+  modifiedCells: string[];
+};
+
+const STORAGE_KEY = "decision-layout:builder-state";
+
 const MAX_CHOICES = 5;
 
 const mapLikertToSigned = (ui: number) => (ui - 3) / 2;
 const mapImportanceToWeight = (ui: number) => 1 + (ui - 1) / 4;
 const weightToImportance = (w: number) => Math.round(1 + (w - 1) * 4);
 const signedToLikert = (s: number) => Math.round(3 + s * 2);
+
+function persistBuilderState(data: PersistedBuilderState) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch (err) {
+    console.warn("Unable to persist builder state to localStorage", err);
+  }
+
+  if (isEmbedded && window.parent) {
+    try {
+      window.parent.postMessage({ type: "decision-layout:update", payload: data }, "*");
+    } catch (err) {
+      console.warn("Unable to post builder state to parent frame", err);
+    }
+  }
+
+  postStorageToParent();
+}
+
+function cloneScoresUI(source: Record<string, Record<string, number>>) {
+  const clone: Record<string, Record<string, number>> = {};
+  for (const fid of Object.keys(source)) {
+    clone[fid] = { ...source[fid] };
+  }
+  return clone;
+}
 
 export function createBuilderLayout(config: BuilderConfig): Page {
   return (root, ctx) => {
@@ -445,17 +502,52 @@ export function createBuilderLayout(config: BuilderConfig): Page {
     };
 
     function renderPreview(force = false) {
-      if (config.previewMode === "after-finish" && !finished && !force) return;
       const neutralFallback = config.kind === "chart"
         ? config.previewMode === "live" || !finished
         : false;
       const data = toChartData(state, neutralFallback);
+      const waddScores = computeWaddScores(data.options, data.factors, data.scores);
+
+      const tableSnapshot = {
+        options: data.options.map(o => ({
+          id: o.id,
+          label: o.label,
+          weight: o.weight,
+        })),
+        factors: data.factors.map(f => ({
+          id: f.id,
+          label: f.label,
+          weight: f.weight,
+          importance: weightToImportance(f.weight),
+        })),
+        scores: cloneScoresUI(state.scoresUI),
+        waddScores,
+      };
+
+      persistBuilderState({
+        chart: data,
+        table: tableSnapshot,
+        decision: {
+          options: state.options.map(o => ({ id: o.id, label: o.label })),
+          waddScores,
+        },
+        meta: {
+          kind: config.kind,
+          previewMode: config.previewMode,
+          showWadd: showWADD,
+          finished,
+        },
+        modifiedCells: Array.from(touchedCells),
+      });
+
+      if (config.previewMode === "after-finish" && !finished && !force) return;
+
       if (config.kind === "chart") {
         ensureChartSize();
         chart?.setShowWADD(showWADD);
         chart?.data({ ...data, modified: touchedCells }).render();
       } else {
-        renderTable(data, showWADD);
+        renderTable(data, showWADD && waddMode !== "never", waddScores);
       }
     }
 
@@ -484,7 +576,11 @@ export function createBuilderLayout(config: BuilderConfig): Page {
       return { options, factors, scores };
     }
 
-    function renderTable(data: ReturnType<typeof toChartData>, includeWADD: boolean) {
+    function renderTable(
+      data: ReturnType<typeof toChartData>,
+      includeWADD: boolean,
+      waddScores: Record<string, number>
+    ) {
       vizEl.replaceChildren();
 
       const table = document.createElement("table");
@@ -533,7 +629,6 @@ export function createBuilderLayout(config: BuilderConfig): Page {
       });
 
       if (includeWADD) {
-        const waddScores = computeWaddScores(data.options, data.factors, data.scores);
         const waddRow = document.createElement("tr");
         waddRow.classList.add("table-wadd");
         const waddLabel = document.createElement("th");
@@ -577,5 +672,7 @@ export function createBuilderLayout(config: BuilderConfig): Page {
     if (config.previewMode === "live") {
       renderPreview(true);
     }
+
+    postStorageToParent();
   };
 }

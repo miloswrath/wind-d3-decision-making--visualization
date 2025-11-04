@@ -1,3 +1,5 @@
+import { postStorageToParent } from "./embedMessaging";
+
 type DecisionOption = { id: string; label: string };
 
 type DecisionData = {
@@ -90,10 +92,13 @@ function storeDecision(payload: { option: string; waddScore: number; relativeOpt
   } catch {
     // no-op if storage not available
   }
+  postStorageToParent();
 }
 
 export function attachDecisionWorkflow({ host, getDecisionData, showWaddOnButtons, onRestart }: AttachParams) {
   if (!host) return;
+
+  postStorageToParent();
 
   const actionWrap = document.createElement("div");
   actionWrap.className = "decision-action";
