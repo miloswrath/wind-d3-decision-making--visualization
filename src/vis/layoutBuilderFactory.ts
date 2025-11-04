@@ -14,6 +14,42 @@ type UIState = {
   scoresUI: Record<string, Record<string, number>>;
 };
 
+type ChartDataSnapshot = {
+  options: { id: string; label: string; weight: number }[];
+  factors: { id: string; label: string; weight: number }[];
+  scores: Record<string, Record<string, number>>;
+};
+
+const STORAGE_KEY = "decision-layout:builder-state";
+
+const isEmbedded = (() => {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+})();
+
+function persistBuilderState(data: ChartDataSnapshot) {
+  if (typeof window === "undefined") return;
+  const serialized = JSON.stringify(data);
+  try {
+    window.localStorage.setItem(STORAGE_KEY, serialized);
+  } catch (err) {
+    console.warn("Unable to persist builder state to localStorage", err);
+  }
+
+  if (isEmbedded && window.parent) {
+    try {
+      const payload = JSON.parse(serialized) as ChartDataSnapshot;
+      window.parent.postMessage({ type: "decision-layout:update", payload }, "*");
+    } catch (err) {
+      console.warn("Unable to post builder state to parent frame", err);
+    }
+  }
+}
+
 const MAX_CHOICES = 5;
 
 const mapLikertToSigned = (ui: number) => (ui - 3) / 2;
@@ -436,6 +472,7 @@ export function createBuilderLayout(config: BuilderConfig): Page {
         ? config.previewMode === "live" || !finished
         : false;
       const data = toChartData(state, neutralFallback);
+      persistBuilderState(data);
       if (config.kind === "chart") {
         ensureChartSize();
         chart?.data(data).render();
@@ -444,7 +481,7 @@ export function createBuilderLayout(config: BuilderConfig): Page {
       }
     }
 
-    function toChartData(s: UIState, neutralFallback = false) {
+    function toChartData(s: UIState, neutralFallback = false): ChartDataSnapshot {
       const options = s.options.map(o => ({
         id: o.id,
         label: o.label,
@@ -469,7 +506,7 @@ export function createBuilderLayout(config: BuilderConfig): Page {
       return { options, factors, scores };
     }
 
-    function renderTable(data: ReturnType<typeof toChartData>) {
+    function renderTable(data: ChartDataSnapshot) {
       vizEl.replaceChildren();
 
       const table = document.createElement("table");
@@ -552,7 +589,7 @@ export function createBuilderLayout(config: BuilderConfig): Page {
       vizEl.appendChild(table);
     }
 
-    function calculateTableWADD(data: ReturnType<typeof toChartData>) {
+    function calculateTableWADD(data: ChartDataSnapshot) {
       const result: Record<string, number> = {};
       data.options.forEach(option => {
         let weightedTotal = 0;
